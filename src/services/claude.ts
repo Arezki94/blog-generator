@@ -1,12 +1,6 @@
-/**
- * Service Claude API pour la génération d'articles SEO
- * Utilise le proxy Railway: claude-proxy-production-496d.up.railway.app
- */
-
 import { BlogArticle, FeaturedProduct, BlogLink, H2Section } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
-// URL du proxy Claude sur Railway
 const PROXY_URL = 'https://claude-proxy-production-496d.up.railway.app';
 
 interface ClaudeMessage {
@@ -16,12 +10,8 @@ interface ClaudeMessage {
 
 interface ClaudeResponse {
   content: Array<{ type: string; text: string }>;
-  usage?: { input_tokens: number; output_tokens: number };
 }
 
-/**
- * Appel au proxy Claude
- */
 async function callClaude(
   systemPrompt: string,
   messages: ClaudeMessage[],
@@ -29,9 +19,7 @@ async function callClaude(
 ): Promise<string> {
   const response = await fetch(`${PROXY_URL}/api/claude`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: maxTokens,
@@ -49,37 +37,24 @@ async function callClaude(
   return data.content[0]?.text || '';
 }
 
-/**
- * System prompt pour les articles SEO pommeaudevitesse.com
- * Basé sur les règles bay' as-salam et la structure validée
- */
-const SEO_SYSTEM_PROMPT = `Tu es un rédacteur SEO expert pour pommeaudevitesse.com, une boutique française de pommeaux de vitesse.
+const SEO_SYSTEM_PROMPT = `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
 
-RÈGLES ÉTHIQUES (bay' as-salam) - OBLIGATOIRES :
+CONNAISSANCES TECHNIQUES ESSENTIELLES :
+- Les véhicules Peugeot, Citroën et Renault utilisent un INSERT DE FIXATION EN PLASTIQUE sur la tige métallique du levier
+- Les pommeaux se posent par EMBOÎTEMENT sur cet insert plastique (pas de vissage)
+- Le démontage se fait en tirant fermement vers le haut, parfois en appuyant sur un clip de déverrouillage
+- Les inserts ont des diamètres standards : généralement 12mm pour PSA (Peugeot/Citroën)
+- Certains modèles ont un soufflet/manchon à retirer avant d'accéder au pommeau
+
+RÈGLES D'ÉCRITURE OBLIGATOIRES :
 - JAMAIS de possessifs commerciaux : "ce", "ces", "nos", "notre", "votre", "vos"
-- Matériaux honnêtes : "simili-cuir" jamais "cuir véritable" sauf si vérifié
-- Ton informatif et utile, pas commercial agressif
+- Matériaux honnêtes : écrire "simili-cuir" jamais "cuir véritable" sauf si vérifié
+- Donner des VRAIES informations techniques utiles au lecteur
+- Répondre VRAIMENT à la question posée dans le H1
+- Ton expert mais accessible, comme un mécanicien qui explique à un ami
 
-STRUCTURE HTML OBLIGATOIRE :
-1. <h2>[Question H2]</h2>
-2. <p>[Paragraphe ~100 mots avec mots-clés en <strong>]</p>
-3. <h3>[Sous-titre H3]</h3>
-4. <p>[Paragraphe ~80 mots]</p>
-5. <h3>Caractéristiques du produit</h3>
-6. <ul><li>...</li></ul> (specs techniques)
-7. <p>[Paragraphe avec lien interne si fourni]</p>
+FORMAT DE RÉPONSE : HTML pur uniquement. Pas de JSON, pas de markdown, pas de backticks.`;
 
-STYLE D'ÉCRITURE :
-- Prose humaine variée, pas de listes sauf specs
-- Mots-clés LSI naturellement intégrés
-- Éviter les répétitions, varier les angles narratifs
-- Phrases entre 15-25 mots en moyenne
-
-FORMAT DE SORTIE : JSON uniquement, pas de markdown`;
-
-/**
- * Génère un article complet avec Claude
- */
 export async function generateArticleWithClaude(
   h1: string,
   anchorText: string,
@@ -93,97 +68,85 @@ export async function generateArticleWithClaude(
   const articleId = uuidv4();
   
   try {
-    // Étape 1: Analyse et planification
-    onProgress('Analyse du sujet...', 5);
+    onProgress('Planification de l\'article...', 5);
     
-    const planPrompt = `Analyse ce H1 et crée un plan d'article SEO optimisé.
+    // Étape 1 : Plan et meta
+    const planPrompt = `Pour cet article sur "${h1}", donne-moi en 5 lignes maximum :
+1. Un titre SEO de max 60 caractères finissant par "– Livraison gratuite"
+2. Une meta description de max 155 caractères commençant par un verbe d'action
+3. ${h2Count} questions H2 que se pose vraiment quelqu'un qui cherche "${h1}"
 
-H1: "${h1}"
-Nombre de sections H2: ${h2Count}
-Lien interne principal: "${anchorText}" → ${anchorUrl}
-${featuredProducts.length > 0 ? `Produits à mentionner: ${featuredProducts.map(p => p.title).join(', ')}` : ''}
-${blogLinks.length > 0 ? `Liens blog à intégrer: ${blogLinks.map(l => l.anchorText).join(', ')}` : ''}
-
-Réponds en JSON:
-{
-  "seoTitle": "Titre SEO max 60 car. finissant par – Livraison gratuite",
-  "metaDescription": "Description max 155 car. commençant par infinitif action (Découvrez, Trouvez...)",
-  "h2Questions": ["Question 1?", "Question 2?", ...],
-  "keywords": ["mot-clé 1", "mot-clé 2", ...],
-  "angle": "Angle narratif unique pour éviter duplicate content"
-}`;
+Réponds directement sans formatage spécial.`;
 
     const planResponse = await callClaude(SEO_SYSTEM_PROMPT, [
       { role: 'user', content: planPrompt }
     ]);
     
-    onProgress('Planification terminée', 15);
+    const lines = planResponse.split('\n').filter(l => l.trim());
+    const seoTitle = lines[0]?.replace(/^1\.\s*/, '').slice(0, 60) || `${h1.slice(0, 45)} – Livraison gratuite`;
+    const metaDescription = lines[1]?.replace(/^2\.\s*/, '').slice(0, 155) || `Découvrez ${h1.toLowerCase()}. Guide complet avec conseils d'expert.`;
     
-    let plan;
-    try {
-      const jsonMatch = planResponse.match(/\{[\s\S]*\}/);
-      plan = JSON.parse(jsonMatch?.[0] || planResponse);
-    } catch {
-      plan = {
-        seoTitle: `${h1.slice(0, 50)} – Livraison gratuite`,
-        metaDescription: `Découvrez ${h1.toLowerCase()}. Guide complet et conseils d'experts pour bien choisir.`,
-        h2Questions: Array.from({ length: h2Count }, (_, i) => `Question ${i + 1} sur ${h1}?`),
-        keywords: [h1.toLowerCase(), 'pommeau de vitesse', 'levier de vitesse'],
-        angle: 'Guide pratique'
-      };
+    const h2Questions: string[] = [];
+    for (let i = 2; i < lines.length && h2Questions.length < h2Count; i++) {
+      const q = lines[i]?.replace(/^\d+\.\s*/, '').trim();
+      if (q && q.length > 10) h2Questions.push(q);
+    }
+    while (h2Questions.length < h2Count) {
+      h2Questions.push(`Comment choisir le bon pommeau pour ${h1.toLowerCase().replace('comment ', '')} ?`);
     }
 
-    // Étape 2: Génération de l'introduction
-    onProgress('Rédaction de l\'introduction...', 20);
-    
-    const introPrompt = `Rédige une introduction engageante (~80 mots) pour cet article.
+    onProgress('Rédaction de l\'introduction...', 15);
 
-H1: "${h1}"
-Angle: ${plan.angle}
-Mots-clés à intégrer: ${plan.keywords.slice(0, 3).join(', ')}
+    // Étape 2 : Introduction
+    const introPrompt = `Écris une introduction de 80-100 mots pour un article intitulé "${h1}".
 
-L'introduction doit:
-- Accrocher le lecteur dès la première phrase
-- Présenter le problème/besoin
-- Annoncer la valeur de l'article
-- Inclure le lien interne: <a href="${anchorUrl}">${anchorText}</a> dans les 300 premiers mots
+L'introduction doit :
+- Accrocher avec le problème concret du lecteur
+- Mentionner que les pommeaux PSA (Peugeot/Citroën) utilisent un système d'emboîtement sur insert plastique
+- Inclure naturellement ce lien : <a href="${anchorUrl}">${anchorText}</a>
+- Promettre une réponse claire et pratique
 
-Réponds avec le HTML de l'introduction uniquement (balises <p>).`;
+Réponds avec uniquement le HTML (balises <p> avec quelques <strong> sur les mots-clés).`;
 
     const intro = await callClaude(SEO_SYSTEM_PROMPT, [
       { role: 'user', content: introPrompt }
     ]);
-    
-    onProgress('Introduction rédigée', 25);
 
-    // Étape 3: Génération des sections H2
+    onProgress('Rédaction des sections...', 25);
+
+    // Étape 3 : Sections H2
     const h2Sections: H2Section[] = [];
-    const progressPerSection = 60 / h2Count;
+    const progressPerSection = 55 / h2Count;
     
     for (let i = 0; i < h2Count; i++) {
-      const h2Question = plan.h2Questions[i] || `Comment ${h1.toLowerCase()}?`;
-      onProgress(`Rédaction section ${i + 1}/${h2Count}...`, 25 + (i * progressPerSection));
+      const h2Question = h2Questions[i];
+      onProgress(`Section ${i + 1}/${h2Count}...`, 25 + (i * progressPerSection));
       
-      const sectionPrompt = `Rédige la section H2 complète pour cette question.
+      let extraInstructions = '';
+      if (i === 0 && featuredProducts.length > 0) {
+        extraInstructions = `\nMentionne naturellement ce produit : ${featuredProducts[0].title} (lien: ${featuredProducts[0].url})`;
+      }
+      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) {
+        extraInstructions += `\nIntègre ce lien vers un autre article : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
+      }
 
-Question H2: "${h2Question}"
-Position dans l'article: ${i + 1}/${h2Count}
-Mots-clés: ${plan.keywords.join(', ')}
-${i === 0 && featuredProducts.length > 0 ? `Mentionner ce produit naturellement: ${featuredProducts[0].title} (${featuredProducts[0].url})` : ''}
-${i === Math.floor(h2Count / 2) && blogLinks.length > 0 ? `Intégrer ce lien blog: <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>` : ''}
+      const sectionPrompt = `Écris la section complète pour cette question : "${h2Question}"
 
-Structure obligatoire:
-1. <h2>${h2Question}</h2>
-2. <p>Paragraphe principal ~100 mots avec 2-3 <strong>mots-clés</strong></p>
-3. <h3>Sous-titre pertinent</h3>
-4. <p>Paragraphe secondaire ~80 mots</p>
-${i % 2 === 0 ? '5. <ul><li>Point 1</li><li>Point 2</li><li>Point 3</li></ul>' : ''}
+La section doit contenir :
+1. Le <h2>${h2Question}</h2>
+2. Un paragraphe principal de ~100 mots avec des informations VRAIES et UTILES
+3. Un <h3> avec un sous-titre pertinent
+4. Un paragraphe de ~60 mots
+${i % 2 === 0 ? '5. Une liste <ul> de 3-4 points techniques concrets' : ''}
+${extraInstructions}
 
-Réponds avec le HTML uniquement.`;
+IMPORTANT : Donne des vraies infos techniques (système d'insert plastique, diamètres, méthode de démontage, etc.)
+
+Réponds avec uniquement le HTML, pas de JSON ni de commentaires.`;
 
       const sectionHtml = await callClaude(SEO_SYSTEM_PROMPT, [
         { role: 'user', content: sectionPrompt }
-      ], deepMode ? 2048 : 1024);
+      ], deepMode ? 1500 : 1000);
 
       h2Sections.push({
         id: uuidv4(),
@@ -194,46 +157,39 @@ Réponds avec le HTML uniquement.`;
       });
     }
     
-    onProgress('Sections H2 terminées', 85);
+    onProgress('Génération de la FAQ...', 85);
 
-    // Étape 4: Génération de la FAQ
-    onProgress('Génération de la FAQ...', 90);
-    
-    const faqPrompt = `Génère 3-4 questions FAQ pertinentes avec réponses courtes.
+    // Étape 4 : FAQ
+    const faqPrompt = `Génère 4 questions/réponses FAQ pour "${h1}".
 
-Sujet: "${h1}"
-Mots-clés: ${plan.keywords.join(', ')}
+Format HTML uniquement, comme ceci :
+<div class="faq-item">
+<h3>Question ici ?</h3>
+<p>Réponse concise de 2-3 phrases avec de vraies infos techniques.</p>
+</div>
 
-Format JSON:
-{
-  "faq": [
-    {"question": "Question 1?", "answer": "Réponse concise ~50 mots."},
-    ...
-  ]
-}`;
+Les questions doivent être celles que les gens tapent vraiment sur Google.
+Les réponses doivent être utiles et techniques (parler du système d'emboîtement, des inserts, etc.)`;
 
-    const faqResponse = await callClaude(SEO_SYSTEM_PROMPT, [
+    const faqHtml = await callClaude(SEO_SYSTEM_PROMPT, [
       { role: 'user', content: faqPrompt }
     ]);
     
-    let faqItems = [];
-    try {
-      const faqJson = JSON.parse(faqResponse.match(/\{[\s\S]*\}/)?.[0] || '{}');
-      faqItems = faqJson.faq || [];
-    } catch {
-      faqItems = [
-        { question: `Qu'est-ce qu'un ${h1.toLowerCase()}?`, answer: 'Réponse à compléter.' }
-      ];
+    // Parser la FAQ
+    const faqItems: Array<{question: string, answer: string}> = [];
+    const faqMatches = faqHtml.matchAll(/<h3>([^<]+)<\/h3>\s*<p>([^<]+)<\/p>/g);
+    for (const match of faqMatches) {
+      faqItems.push({ question: match[1], answer: match[2] });
     }
 
-    onProgress('Article terminé!', 100);
+    onProgress('Article terminé !', 100);
 
-    const article: BlogArticle = {
+    return {
       id: articleId,
       h1,
-      seoTitle: plan.seoTitle,
-      metaDescription: plan.metaDescription,
-      intro,
+      seoTitle,
+      metaDescription,
+      intro: intro.replace(/```[a-z]*\n?/g, '').replace(/```/g, ''),
       h2Sections,
       faq: faqItems,
       anchorText,
@@ -243,8 +199,6 @@ Format JSON:
       status: 'draft',
       createdAt: new Date().toISOString(),
     };
-
-    return article;
     
   } catch (error) {
     console.error('Erreur génération Claude:', error);
@@ -252,9 +206,6 @@ Format JSON:
   }
 }
 
-/**
- * Génère un mini article (300-500 mots)
- */
 export async function generateMiniArticle(
   h1: string,
   anchorText: string,
@@ -267,59 +218,38 @@ export async function generateMiniArticle(
 ): Promise<BlogArticle> {
   const articleId = uuidv4();
   
-  onProgress('Préparation du mini article...', 10);
+  onProgress('Préparation...', 10);
 
-  const prompt = `Rédige un mini article SEO de ${wordCount} mots exactement.
+  const prompt = `Écris un article de ${wordCount} mots sur "${h1}".
 
-H1: "${h1}"
-Lien interne obligatoire: <a href="${anchorUrl}">${anchorText}</a>
-${featuredProducts.length > 0 ? `Produit à mentionner: ${featuredProducts[0].title}` : ''}
+STRUCTURE :
+- Introduction accrocheuse (2 phrases)
+- 2-3 paragraphes avec de vraies informations techniques
+- Inclure ce lien naturellement : <a href="${anchorUrl}">${anchorText}</a>
+${featuredProducts.length > 0 ? `- Mentionner ce produit : ${featuredProducts[0].title}` : ''}
 
-Structure:
-1. Introduction accrocheuse (2-3 phrases)
-2. Corps de l'article avec 2-3 paragraphes denses
-3. Conclusion avec call-to-action subtil
+RAPPEL TECHNIQUE : Les pommeaux Peugeot/Citroën/Renault utilisent un insert plastique sur lequel le pommeau s'emboîte.
 
-Règles:
-- Mots-clés en <strong> (3-5 maximum)
-- Pas de listes à puces
-- Ton expert mais accessible
-- AUCUN possessif commercial (ce, ces, nos, notre)
+FORMAT : HTML direct avec <p> et quelques <strong> sur les mots-clés. Pas de JSON.`;
 
-Réponds en JSON:
-{
-  "seoTitle": "Max 60 car. – Livraison gratuite",
-  "metaDescription": "Max 155 car. commençant par infinitif",
-  "content": "<p>HTML complet de l'article</p>"
-}`;
+  onProgress('Rédaction...', 40);
 
-  onProgress('Claude rédige...', 30);
-
-  const response = await callClaude(SEO_SYSTEM_PROMPT, [
+  const content = await callClaude(SEO_SYSTEM_PROMPT, [
     { role: 'user', content: prompt }
-  ], deepMode ? 2048 : 1500);
+  ], deepMode ? 1500 : 1000);
 
   onProgress('Finalisation...', 80);
 
-  let parsed;
-  try {
-    parsed = JSON.parse(response.match(/\{[\s\S]*\}/)?.[0] || '{}');
-  } catch {
-    parsed = {
-      seoTitle: `${h1.slice(0, 50)} – Livraison gratuite`,
-      metaDescription: `Découvrez ${h1.toLowerCase()}. Guide rapide et conseils pratiques.`,
-      content: `<p>${response}</p>`
-    };
-  }
+  const cleanContent = content.replace(/```[a-z]*\n?/g, '').replace(/```/g, '');
 
-  onProgress('Terminé!', 100);
+  onProgress('Terminé !', 100);
 
   return {
     id: articleId,
     h1,
-    seoTitle: parsed.seoTitle,
-    metaDescription: parsed.metaDescription,
-    intro: parsed.content,
+    seoTitle: `${h1.slice(0, 45)} – Livraison gratuite`,
+    metaDescription: `Découvrez ${h1.toLowerCase()}. Guide pratique avec conseils d'expert.`,
+    intro: cleanContent,
     h2Sections: [],
     faq: [],
     anchorText,
