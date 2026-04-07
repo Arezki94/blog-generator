@@ -8,14 +8,11 @@ interface ClaudeMessage {
   content: string;
 }
 
-interface ClaudeResponse {
-  content: Array<{ type: string; text: string }>;
-}
-
 async function callClaude(
   systemPrompt: string,
   messages: ClaudeMessage[],
-  maxTokens: number = 4096
+  maxTokens: number = 4096,
+  useWebSearch: boolean = false
 ): Promise<string> {
   const response = await fetch(`${PROXY_URL}/api/claude`, {
     method: 'POST',
@@ -25,6 +22,7 @@ async function callClaude(
       max_tokens: maxTokens,
       system: systemPrompt,
       messages,
+      useWebSearch,
     }),
   });
 
@@ -33,8 +31,9 @@ async function callClaude(
     throw new Error(`Claude API error: ${response.status} - ${error}`);
   }
 
-  const data: ClaudeResponse = await response.json();
-  let text = data.content[0]?.text || '';
+  const data = await response.json();
+  // Utiliser extractedText si disponible (recherche web), sinon content standard
+  let text = data.extractedText || data.content?.[0]?.text || '';
   return text.trim();
 }
 
@@ -48,7 +47,6 @@ function cleanHtml(text: string): string {
 }
 
 function extractJson(text: string): any {
-  // Essayer de trouver du JSON dans la réponse
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {
@@ -72,7 +70,9 @@ RÈGLES D'ÉCRITURE :
 - JAMAIS de possessifs commerciaux : "ce", "ces", "nos", "notre", "votre", "vos"
 - Matériaux honnêtes : "simili-cuir" jamais "cuir véritable"
 - Donner des VRAIES infos techniques utiles
-- Ton expert mais accessible`;
+- Ton expert mais accessible
+
+IMPORTANT : Utilise la recherche web pour trouver des informations réelles et à jour.`;
 
 export async function generateArticleWithClaude(
   h1: string,
@@ -88,11 +88,11 @@ export async function generateArticleWithClaude(
   
   try {
     // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 1 : Planification
+    // ÉTAPE 1 : Planification avec recherche web
     // ═══════════════════════════════════════════════════════════════════════
-    onProgress('Planification...', 5);
+    onProgress('Recherche et planification...', 5);
     
-    const planPrompt = `Pour "${h1}", réponds UNIQUEMENT avec ce JSON (pas de texte avant/après) :
+    const planPrompt = `Pour "${h1}", fais d'abord une recherche web pour comprendre le sujet, puis réponds UNIQUEMENT avec ce JSON :
 {
   "seoTitle": "titre max 55 caractères – Livraison gratuite",
   "metaDescription": "description max 150 caractères commençant par un verbe",
@@ -101,46 +101,44 @@ export async function generateArticleWithClaude(
 
 Les questions H2 doivent être celles que les gens cherchent vraiment sur Google.`;
 
-    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }]);
+    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 1500, true);
     const planData = extractJson(planResponse);
     
     const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
     const metaDescription = planData?.metaDescription || `Découvrez comment ${h1.toLowerCase()}. Guide complet.`;
     const h2Questions: string[] = planData?.h2Questions?.slice(0, h2Count) || [];
     
-    // Compléter si pas assez de questions
     while (h2Questions.length < h2Count) {
       h2Questions.push(`Comment choisir le bon pommeau ?`);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 2 : Introduction
+    // ÉTAPE 2 : Introduction avec recherche web
     // ═══════════════════════════════════════════════════════════════════════
     onProgress('Rédaction introduction...', 15);
 
-    const introPrompt = `Écris une introduction de 80-100 mots pour "${h1}".
+    const introPrompt = `Recherche des infos sur "${h1}" puis écris une introduction de 80-100 mots.
 
 Inclure :
 - Le problème du lecteur (pommeau usé, cassé)
-- Mentionner le système d'emboîtement PSA (insert plastique 12mm)
+- Des infos techniques RÉELLES trouvées en ligne
 - Ce lien naturellement intégré : <a href="${anchorUrl}">${anchorText}</a>
 
 Réponds avec UNIQUEMENT le HTML (balises <p>, quelques <strong> sur mots-clés). Pas de JSON.`;
 
-    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }]);
+    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 1000, true);
     const intro = cleanHtml(introResponse);
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 3 : Sections H2
+    // ÉTAPE 3 : Sections H2 avec recherche web
     // ═══════════════════════════════════════════════════════════════════════
     const h2Sections: H2Section[] = [];
     const progressPerSection = 60 / h2Count;
     
     for (let i = 0; i < h2Count; i++) {
       const question = h2Questions[i];
-      onProgress(`Section ${i + 1}/${h2Count}...`, 20 + (i * progressPerSection));
+      onProgress(`Recherche section ${i + 1}/${h2Count}...`, 20 + (i * progressPerSection));
       
-      // Liens à intégrer
       let extraContext = '';
       if (i === 0 && featuredProducts.length > 0) {
         extraContext += `\nMentionne ce produit : "${featuredProducts[0].title}" avec lien ${featuredProducts[0].url}`;
@@ -149,26 +147,24 @@ Réponds avec UNIQUEMENT le HTML (balises <p>, quelques <strong> sur mots-clés)
         extraContext += `\nIntègre ce lien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
       }
 
-      const sectionPrompt = `Pour la section "${question}", réponds UNIQUEMENT avec ce JSON :
+      const sectionPrompt = `Recherche des informations sur "${question}" puis réponds UNIQUEMENT avec ce JSON :
 {
-  "intro": "1-2 phrases d'introduction de la section",
+  "intro": "1-2 phrases d'introduction basées sur des faits réels",
   "h3s": [
     {
-      "title": "Sous-titre H3",
-      "content": "<p>Paragraphe avec <strong>mots-clés</strong> et infos techniques.</p><ul><li>Point 1</li><li>Point 2</li></ul>"
+      "title": "Sous-titre H3 pertinent",
+      "content": "<p>Paragraphe avec <strong>mots-clés</strong> et infos techniques RÉELLES trouvées en ligne.</p><ul><li>Point technique 1</li><li>Point technique 2</li></ul>"
     }
   ],
-  "tip": "Conseil pratique utile (ou null si pas pertinent)",
-  "conclusion": "Phrase de conclusion de section"
+  "tip": "Conseil pratique utile basé sur des vraies recommandations (ou null)",
+  "conclusion": "Phrase de conclusion"
 }
 
-IMPORTANT : Le content des H3 doit être du HTML valide avec <p>, <ul>, <li>, <strong>.
-Donne des vraies infos techniques (insert 12mm, clip déverrouillage, etc.)${extraContext}`;
+IMPORTANT : Utilise des informations RÉELLES trouvées sur le web, pas des généralités.${extraContext}`;
 
-      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], deepMode ? 2000 : 1500);
+      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], deepMode ? 2500 : 2000, true);
       const sectionData = extractJson(sectionResponse);
       
-      // Construire les H3
       const h3s: H3Section[] = [];
       if (sectionData?.h3s && Array.isArray(sectionData.h3s)) {
         for (const h3 of sectionData.h3s) {
@@ -180,25 +176,25 @@ Donne des vraies infos techniques (insert 12mm, clip déverrouillage, etc.)${ext
         }
       }
       
-      // Construire le tip
       let tip: Tip | null = null;
       if (sectionData?.tip && typeof sectionData.tip === 'string' && sectionData.tip.length > 10) {
         tip = { text: sectionData.tip };
       }
       
-      // Ajouter un tableau pour certaines sections
       let table: ComparisonTable | null = null;
       if (i === 1 || i === 3) {
-        // Générer un tableau comparatif
-        const tablePrompt = `Génère un tableau comparatif pour "${question}". Réponds UNIQUEMENT avec ce JSON :
+        const tablePrompt = `Recherche des comparatifs pour "${question}" et génère un tableau. Réponds UNIQUEMENT avec ce JSON :
 {
   "headers": ["Critère", "Option 1", "Option 2"],
   "rows": [
-    {"cells": ["Prix", "20-30€", "40-60€"]},
-    {"cells": ["Matériau", "Plastique ABS", "Simili-cuir"]}
+    {"cells": ["Prix moyen", "20-30€", "40-60€"]},
+    {"cells": ["Matériau", "Plastique ABS", "Simili-cuir"]},
+    {"cells": ["Durabilité", "3-5 ans", "5-8 ans"]}
   ]
-}`;
-        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 500);
+}
+
+Utilise des données RÉELLES trouvées en ligne.`;
+        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 800, true);
         const tableData = extractJson(tableResponse);
         if (tableData?.headers && tableData?.rows) {
           table = {
@@ -212,7 +208,7 @@ Donne des vraies infos techniques (insert 12mm, clip déverrouillage, etc.)${ext
         id: uuidv4(),
         question: question,
         intro: sectionData?.intro || '',
-        paragraphs: [], // On utilise h3s à la place
+        paragraphs: [],
         conclusion: sectionData?.conclusion || '',
         tip: tip,
         table: table,
@@ -223,23 +219,23 @@ Donne des vraies infos techniques (insert 12mm, clip déverrouillage, etc.)${ext
     }
     
     // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 4 : FAQ
+    // ÉTAPE 4 : FAQ avec recherche web
     // ═══════════════════════════════════════════════════════════════════════
     onProgress('Génération FAQ...', 90);
 
-    const faqPrompt = `Génère 4 questions/réponses FAQ pour "${h1}". Réponds UNIQUEMENT avec ce JSON :
+    const faqPrompt = `Recherche les questions fréquentes sur "${h1}" puis réponds UNIQUEMENT avec ce JSON :
 {
   "faq": [
-    {"question": "Question 1 ?", "answer": "Réponse concise avec infos techniques."},
-    {"question": "Question 2 ?", "answer": "Réponse concise."},
-    {"question": "Question 3 ?", "answer": "Réponse concise."},
-    {"question": "Question 4 ?", "answer": "Réponse concise."}
+    {"question": "Question fréquente 1 ?", "answer": "Réponse basée sur des faits réels."},
+    {"question": "Question fréquente 2 ?", "answer": "Réponse technique précise."},
+    {"question": "Question fréquente 3 ?", "answer": "Réponse pratique."},
+    {"question": "Question fréquente 4 ?", "answer": "Réponse utile."}
   ]
 }
 
-Les réponses doivent être techniques et utiles (diamètre insert, méthode démontage, etc.)`;
+Les réponses doivent être basées sur des VRAIES informations trouvées en ligne.`;
 
-    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }]);
+    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 1500, true);
     const faqData = extractJson(faqResponse);
     
     const faqItems: FAQItem[] = [];
@@ -291,9 +287,9 @@ export async function generateMiniArticle(
 ): Promise<BlogArticle> {
   const articleId = uuidv4();
   
-  onProgress('Rédaction en cours...', 30);
+  onProgress('Recherche et rédaction...', 30);
 
-  const prompt = `Écris un article de ${wordCount} mots sur "${h1}".
+  const prompt = `Recherche des informations sur "${h1}" puis écris un article de ${wordCount} mots.
 
 Structure HTML :
 - <p> pour paragraphes avec <strong> sur mots-clés importants
@@ -302,11 +298,11 @@ Structure HTML :
 - Intègre ce lien : <a href="${anchorUrl}">${anchorText}</a>
 ${featuredProducts.length > 0 ? `- Mentionne : ${featuredProducts[0].title}` : ''}
 
-Infos techniques à inclure : insert plastique 12mm (PSA), système emboîtement, pas de vissage.
+IMPORTANT : Utilise des informations RÉELLES trouvées sur le web.
 
 Réponds avec UNIQUEMENT le HTML, pas de JSON ni de backticks.`;
 
-  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], deepMode ? 1500 : 1000);
+  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], deepMode ? 2000 : 1500, true);
   const content = cleanHtml(response);
 
   onProgress('Terminé !', 100);
