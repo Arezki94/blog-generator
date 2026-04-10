@@ -32,7 +32,6 @@ async function callClaude(
   }
 
   const data = await response.json();
-  // Utiliser extractedText si disponible (recherche web), sinon content standard
   let text = data.extractedText || data.content?.[0]?.text || '';
   return text.trim();
 }
@@ -58,28 +57,66 @@ function extractJson(text: string): any {
   return null;
 }
 
-const SYSTEM_PROMPT = `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
+// ═══════════════════════════════════════════════════════════════════════════
+// CONNAISSANCES MÉTIER VÉRIFIÉES
+// ═══════════════════════════════════════════════════════════════════════════
+const EXPERTISE_POMMEAU = `
+CONNAISSANCES MÉTIER VÉRIFIÉES (à croiser avec recherche web) :
 
-CONNAISSANCES TECHNIQUES :
-- Véhicules PSA (Peugeot/Citroën) : insert plastique 12mm, emboîtement sans vissage
-- Véhicules Renault : système similaire avec clip de déverrouillage
-- Démontage : tirer fermement vers le haut, parfois appuyer sur clip
-- Soufflet/manchon à retirer avant sur certains modèles
+🔧 PEUGEOT / CITROËN / RENAULT (PSA) :
+- Système : insert plastique sur tige métallique
+- Étapes : 1) Retirer le soufflet en le tirant vers le bas, 2) Tirer fermement l'ancien pommeau vers le haut, 3) Vérifier l'insert plastique (le garder s'il est bon, sinon le remplacer), 4) Emboîter le nouveau pommeau en appuyant fort
+- Pas de vissage, pas d'outil nécessaire
+- Temps : 2-3 minutes
 
-RÈGLES D'ÉCRITURE :
+🔧 BMW (1998-2014) :
+- Étapes : 1) Tirer l'ancien pommeau vers le haut, 2) Déclipser le plastique de la console centrale, 3) Monter les câbles inclus (pour rétroéclairage si applicable), 4) Emboîter le nouveau pommeau de force
+- Temps : 5-10 minutes
+
+IMPORTANT : Toujours vérifier ces infos avec une recherche web pour les compléter/confirmer selon le modèle exact.`;
+
+const SYSTEM_PROMPT_SHORT = `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
+
+${EXPERTISE_POMMEAU}
+
+STYLE D'ÉCRITURE - ARTICLE COURT ET EFFICACE :
+- RÉPONDRE À LA QUESTION DÈS LA PREMIÈRE PHRASE
+- Paragraphes de 2-3 lignes MAX
+- Aller droit au but, zéro remplissage
+- Ton direct et pratique, comme un mécanicien qui explique à un ami
+- Utiliser des listes pour les étapes
+- Gras sur les mots-clés importants
+
+RÈGLES STRICTES :
 - JAMAIS de possessifs commerciaux : "ce", "ces", "nos", "notre", "votre", "vos"
 - Matériaux honnêtes : "simili-cuir" jamais "cuir véritable"
-- Donner des VRAIES infos techniques utiles
-- Ton expert mais accessible
+- Croiser les infos métier avec la recherche web
+- Si une info trouvée en ligne contredit les connaissances métier, mentionner les deux`;
 
-IMPORTANT : Utilise la recherche web pour trouver des informations réelles et à jour.`;
+const SYSTEM_PROMPT_LONG = `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
 
-export async function generateArticleWithClaude(
+${EXPERTISE_POMMEAU}
+
+STYLE D'ÉCRITURE - ARTICLE COMPLET :
+- Introduction qui pose le contexte
+- Sections détaillées avec exemples
+- Tableaux comparatifs
+- Conseils pratiques
+- FAQ complète
+
+RÈGLES STRICTES :
+- JAMAIS de possessifs commerciaux : "ce", "ces", "nos", "notre", "votre", "vos"
+- Matériaux honnêtes : "simili-cuir" jamais "cuir véritable"
+- Croiser les infos métier avec la recherche web
+- Si une info trouvée en ligne contredit les connaissances métier, mentionner les deux`;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODE ARTICLE COURT (400-700 mots)
+// ═══════════════════════════════════════════════════════════════════════════
+export async function generateShortArticle(
   h1: string,
   anchorText: string,
   anchorUrl: string,
-  h2Count: number,
-  deepMode: boolean,
   onProgress: (step: string, pct: number) => void,
   featuredProducts: FeaturedProduct[] = [],
   blogLinks: BlogLink[] = []
@@ -87,119 +124,127 @@ export async function generateArticleWithClaude(
   const articleId = uuidv4();
   
   try {
-    // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 1 : Planification avec recherche web
-    // ═══════════════════════════════════════════════════════════════════════
-    onProgress('Recherche et planification...', 5);
+    // ─── ÉTAPE 1 : Recherche et vérification des infos ───────────────────
+    onProgress('Recherche et vérification...', 10);
     
-    const planPrompt = `Pour "${h1}", fais d'abord une recherche web pour comprendre le sujet, puis réponds UNIQUEMENT avec ce JSON :
+    const researchPrompt = `Recherche des informations sur "${h1}" pour vérifier et compléter mes connaissances.
+
+Mes connaissances actuelles :
+${EXPERTISE_POMMEAU}
+
+Réponds avec ce JSON :
 {
-  "seoTitle": "titre max 55 caractères – Livraison gratuite",
-  "metaDescription": "description max 150 caractères commençant par un verbe",
-  "h2Questions": ["question 1 ?", "question 2 ?", "question 3 ?", "question 4 ?", "question 5 ?", "question 6 ?"]
+  "infosTrouvees": "Résumé des infos importantes trouvées en ligne",
+  "confirmation": true/false (est-ce que ça confirme mes connaissances ?),
+  "infosSupplementaires": "Détails supplémentaires utiles trouvés"
+}`;
+
+    await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: researchPrompt }], 1000, true);
+
+    // ─── ÉTAPE 2 : Planification courte ──────────────────────────────────
+    onProgress('Planification...', 20);
+    
+    const planPrompt = `Pour "${h1}", réponds UNIQUEMENT avec ce JSON :
+{
+  "seoTitle": "titre max 55 car. accrocheur – Livraison gratuite",
+  "metaDescription": "réponse directe en 150 car. max, commence par un verbe",
+  "h2Questions": ["question 1 ?", "question 2 ?", "question 3 ?"]
 }
 
-Les questions H2 doivent être celles que les gens cherchent vraiment sur Google.`;
+Seulement 3 questions H2, les plus importantes pour répondre à "${h1}".`;
 
-    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 1500, true);
+    const planResponse = await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: planPrompt }], 800, true);
     const planData = extractJson(planResponse);
     
     const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
-    const metaDescription = planData?.metaDescription || `Découvrez comment ${h1.toLowerCase()}. Guide complet.`;
-    const h2Questions: string[] = planData?.h2Questions?.slice(0, h2Count) || [];
+    const metaDescription = planData?.metaDescription || `Découvrez ${h1.toLowerCase()}. Réponse rapide et pratique.`;
+    const h2Questions: string[] = (planData?.h2Questions || []).slice(0, 3);
     
-    while (h2Questions.length < h2Count) {
-      h2Questions.push(`Comment choisir le bon pommeau ?`);
+    while (h2Questions.length < 3) {
+      h2Questions.push(`Comment procéder ?`);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 2 : Introduction avec recherche web
-    // ═══════════════════════════════════════════════════════════════════════
-    onProgress('Rédaction introduction...', 15);
+    // ─── ÉTAPE 3 : Introduction DIRECTE ──────────────────────────────────
+    onProgress('Rédaction intro directe...', 30);
 
-    const introPrompt = `Recherche des infos sur "${h1}" puis écris une introduction de 80-100 mots.
+    const introPrompt = `Écris une intro de 40-60 mots pour "${h1}".
 
-Inclure :
-- Le problème du lecteur (pommeau usé, cassé)
-- Des infos techniques RÉELLES trouvées en ligne
-- Ce lien naturellement intégré : <a href="${anchorUrl}">${anchorText}</a>
+RÈGLE D'OR : Réponds à la question DÈS LA PREMIÈRE PHRASE.
 
-Réponds avec UNIQUEMENT le HTML (balises <p>, quelques <strong> sur mots-clés). Pas de JSON.`;
+Exemple de style :
+"Tirez fermement vers le haut — le pommeau s'emboîte sur un insert plastique, pas de vissage. L'opération prend 2 minutes..."
 
-    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 1000, true);
+Inclure ce lien naturellement : <a href="${anchorUrl}">${anchorText}</a>
+
+Réponds avec UNIQUEMENT le HTML (<p> avec <strong> sur mots-clés). Pas de JSON.`;
+
+    const introResponse = await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: introPrompt }], 500, true);
     const intro = cleanHtml(introResponse);
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 3 : Sections H2 avec recherche web
-    // ═══════════════════════════════════════════════════════════════════════
+    // ─── ÉTAPE 4 : Sections H2 courtes ───────────────────────────────────
     const h2Sections: H2Section[] = [];
-    const progressPerSection = 60 / h2Count;
     
-    for (let i = 0; i < h2Count; i++) {
+    for (let i = 0; i < 3; i++) {
       const question = h2Questions[i];
-      onProgress(`Recherche section ${i + 1}/${h2Count}...`, 20 + (i * progressPerSection));
+      onProgress(`Section ${i + 1}/3...`, 40 + (i * 15));
       
       let extraContext = '';
       if (i === 0 && featuredProducts.length > 0) {
-        extraContext += `\nMentionne ce produit : "${featuredProducts[0].title}" avec lien ${featuredProducts[0].url}`;
+        extraContext += `\nMentionne ce produit : "${featuredProducts[0].title}" (lien: ${featuredProducts[0].url})`;
       }
-      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) {
+      if (i === 1 && blogLinks.length > 0) {
         extraContext += `\nIntègre ce lien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
       }
 
-      const sectionPrompt = `Recherche des informations sur "${question}" puis réponds UNIQUEMENT avec ce JSON :
+      const sectionPrompt = `Pour "${question}", réponds UNIQUEMENT avec ce JSON :
 {
-  "intro": "1-2 phrases d'introduction basées sur des faits réels",
-  "h3s": [
-    {
-      "title": "Sous-titre H3 pertinent",
-      "content": "<p>Paragraphe avec <strong>mots-clés</strong> et infos techniques RÉELLES trouvées en ligne.</p><ul><li>Point technique 1</li><li>Point technique 2</li></ul>"
-    }
-  ],
-  "tip": "Conseil pratique utile basé sur des vraies recommandations (ou null)",
-  "conclusion": "Phrase de conclusion"
+  "h3": {
+    "title": "Sous-titre court et pratique",
+    "content": "<p>Réponse directe en 2-3 phrases avec <strong>mots-clés</strong>.</p><ul><li>Étape 1 courte</li><li>Étape 2 courte</li><li>Étape 3 courte</li></ul>"
+  },
+  "tip": "Conseil pratique en 1 phrase (ou null)"
 }
 
-IMPORTANT : Utilise des informations RÉELLES trouvées sur le web, pas des généralités.${extraContext}`;
+IMPORTANT : 
+- Réponse DIRECTE, pas de blabla
+- 80 mots MAX pour tout le contenu
+- Utilise les connaissances métier vérifiées${extraContext}`;
 
-      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], deepMode ? 2500 : 2000, true);
+      const sectionResponse = await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: sectionPrompt }], 800, true);
       const sectionData = extractJson(sectionResponse);
       
       const h3s: H3Section[] = [];
-      if (sectionData?.h3s && Array.isArray(sectionData.h3s)) {
-        for (const h3 of sectionData.h3s) {
-          h3s.push({
-            id: uuidv4(),
-            title: h3.title || '',
-            content: cleanHtml(h3.content || ''),
-          });
-        }
+      if (sectionData?.h3) {
+        h3s.push({
+          id: uuidv4(),
+          title: sectionData.h3.title || '',
+          content: cleanHtml(sectionData.h3.content || ''),
+        });
       }
       
       let tip: Tip | null = null;
       if (sectionData?.tip && typeof sectionData.tip === 'string' && sectionData.tip.length > 10) {
         tip = { text: sectionData.tip };
       }
-      
+
+      // Tableau seulement pour la section 2
       let table: ComparisonTable | null = null;
-      if (i === 1 || i === 3) {
-        const tablePrompt = `Recherche des comparatifs pour "${question}" et génère un tableau. Réponds UNIQUEMENT avec ce JSON :
+      if (i === 1) {
+        const tablePrompt = `Tableau comparatif COURT pour "${question}". JSON uniquement :
 {
-  "headers": ["Critère", "Option 1", "Option 2"],
+  "headers": ["", "Option A", "Option B"],
   "rows": [
-    {"cells": ["Prix moyen", "20-30€", "40-60€"]},
-    {"cells": ["Matériau", "Plastique ABS", "Simili-cuir"]},
-    {"cells": ["Durabilité", "3-5 ans", "5-8 ans"]}
+    {"cells": ["Difficulté", "Facile", "Moyen"]},
+    {"cells": ["Temps", "2 min", "5 min"]}
   ]
 }
-
-Utilise des données RÉELLES trouvées en ligne.`;
-        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 800, true);
+2-3 lignes MAX.`;
+        const tableResponse = await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: tablePrompt }], 400, true);
         const tableData = extractJson(tableResponse);
         if (tableData?.headers && tableData?.rows) {
           table = {
             headers: tableData.headers,
-            rows: tableData.rows.map((r: any) => ({ cells: r.cells || [] })),
+            rows: tableData.rows.slice(0, 3).map((r: any) => ({ cells: r.cells || [] })),
           };
         }
       }
@@ -207,9 +252,9 @@ Utilise des données RÉELLES trouvées en ligne.`;
       h2Sections.push({
         id: uuidv4(),
         question: question,
-        intro: sectionData?.intro || '',
+        intro: '',
         paragraphs: [],
-        conclusion: sectionData?.conclusion || '',
+        conclusion: '',
         tip: tip,
         table: table,
         h3s: h3s,
@@ -218,34 +263,25 @@ Utilise des données RÉELLES trouvées en ligne.`;
       });
     }
     
-    // ═══════════════════════════════════════════════════════════════════════
-    // ÉTAPE 4 : FAQ avec recherche web
-    // ═══════════════════════════════════════════════════════════════════════
-    onProgress('Génération FAQ...', 90);
+    // ─── ÉTAPE 5 : FAQ courte (2 questions) ──────────────────────────────
+    onProgress('FAQ rapide...', 90);
 
-    const faqPrompt = `Recherche les questions fréquentes sur "${h1}" puis réponds UNIQUEMENT avec ce JSON :
+    const faqPrompt = `2 questions FAQ pour "${h1}". JSON uniquement :
 {
   "faq": [
-    {"question": "Question fréquente 1 ?", "answer": "Réponse basée sur des faits réels."},
-    {"question": "Question fréquente 2 ?", "answer": "Réponse technique précise."},
-    {"question": "Question fréquente 3 ?", "answer": "Réponse pratique."},
-    {"question": "Question fréquente 4 ?", "answer": "Réponse utile."}
+    {"question": "Question pratique 1 ?", "answer": "Réponse en 1-2 phrases max."},
+    {"question": "Question pratique 2 ?", "answer": "Réponse en 1-2 phrases max."}
   ]
-}
+}`;
 
-Les réponses doivent être basées sur des VRAIES informations trouvées en ligne.`;
-
-    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 1500, true);
+    const faqResponse = await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: faqPrompt }], 600, true);
     const faqData = extractJson(faqResponse);
     
     const faqItems: FAQItem[] = [];
     if (faqData?.faq && Array.isArray(faqData.faq)) {
-      for (const item of faqData.faq) {
+      for (const item of faqData.faq.slice(0, 2)) {
         if (item.question && item.answer) {
-          faqItems.push({
-            question: item.question,
-            answer: item.answer,
-          });
+          faqItems.push({ question: item.question, answer: item.answer });
         }
       }
     }
@@ -275,6 +311,164 @@ Les réponses doivent être basées sur des VRAIES informations trouvées en lig
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MODE ARTICLE COMPLET (existant, avec recherche web)
+// ═══════════════════════════════════════════════════════════════════════════
+export async function generateArticleWithClaude(
+  h1: string,
+  anchorText: string,
+  anchorUrl: string,
+  h2Count: number,
+  deepMode: boolean,
+  onProgress: (step: string, pct: number) => void,
+  featuredProducts: FeaturedProduct[] = [],
+  blogLinks: BlogLink[] = []
+): Promise<BlogArticle> {
+  const articleId = uuidv4();
+  
+  try {
+    onProgress('Recherche et planification...', 5);
+    
+    const planPrompt = `Pour "${h1}", fais une recherche web puis réponds UNIQUEMENT avec ce JSON :
+{
+  "seoTitle": "titre max 55 caractères – Livraison gratuite",
+  "metaDescription": "description max 150 caractères commençant par un verbe",
+  "h2Questions": ["question 1 ?", "question 2 ?", "question 3 ?", "question 4 ?", "question 5 ?", "question 6 ?"]
+}`;
+
+    const planResponse = await callClaude(SYSTEM_PROMPT_LONG, [{ role: 'user', content: planPrompt }], 1500, true);
+    const planData = extractJson(planResponse);
+    
+    const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
+    const metaDescription = planData?.metaDescription || `Découvrez comment ${h1.toLowerCase()}. Guide complet.`;
+    const h2Questions: string[] = planData?.h2Questions?.slice(0, h2Count) || [];
+    
+    while (h2Questions.length < h2Count) {
+      h2Questions.push(`Comment choisir le bon pommeau ?`);
+    }
+
+    onProgress('Rédaction introduction...', 15);
+
+    const introPrompt = `Recherche des infos sur "${h1}" puis écris une introduction de 80-100 mots.
+Inclure ce lien : <a href="${anchorUrl}">${anchorText}</a>
+Réponds avec UNIQUEMENT le HTML.`;
+
+    const introResponse = await callClaude(SYSTEM_PROMPT_LONG, [{ role: 'user', content: introPrompt }], 1000, true);
+    const intro = cleanHtml(introResponse);
+
+    const h2Sections: H2Section[] = [];
+    const progressPerSection = 60 / h2Count;
+    
+    for (let i = 0; i < h2Count; i++) {
+      const question = h2Questions[i];
+      onProgress(`Recherche section ${i + 1}/${h2Count}...`, 20 + (i * progressPerSection));
+      
+      let extraContext = '';
+      if (i === 0 && featuredProducts.length > 0) {
+        extraContext += `\nMentionne ce produit : "${featuredProducts[0].title}" avec lien ${featuredProducts[0].url}`;
+      }
+      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) {
+        extraContext += `\nIntègre ce lien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
+      }
+
+      const sectionPrompt = `Recherche sur "${question}" puis réponds avec ce JSON :
+{
+  "intro": "1-2 phrases d'introduction",
+  "h3s": [{"title": "Sous-titre", "content": "<p>Contenu avec <strong>mots-clés</strong>.</p>"}],
+  "tip": "Conseil pratique (ou null)",
+  "conclusion": "Phrase de conclusion"
+}
+Utilise les connaissances métier + recherche web.${extraContext}`;
+
+      const sectionResponse = await callClaude(SYSTEM_PROMPT_LONG, [{ role: 'user', content: sectionPrompt }], deepMode ? 2500 : 2000, true);
+      const sectionData = extractJson(sectionResponse);
+      
+      const h3s: H3Section[] = [];
+      if (sectionData?.h3s && Array.isArray(sectionData.h3s)) {
+        for (const h3 of sectionData.h3s) {
+          h3s.push({
+            id: uuidv4(),
+            title: h3.title || '',
+            content: cleanHtml(h3.content || ''),
+          });
+        }
+      }
+      
+      let tip: Tip | null = null;
+      if (sectionData?.tip && typeof sectionData.tip === 'string' && sectionData.tip.length > 10) {
+        tip = { text: sectionData.tip };
+      }
+      
+      let table: ComparisonTable | null = null;
+      if (i === 1 || i === 3) {
+        const tablePrompt = `Tableau comparatif pour "${question}". JSON :
+{"headers": ["Critère", "Option 1", "Option 2"], "rows": [{"cells": ["...", "...", "..."]}]}`;
+        const tableResponse = await callClaude(SYSTEM_PROMPT_LONG, [{ role: 'user', content: tablePrompt }], 800, true);
+        const tableData = extractJson(tableResponse);
+        if (tableData?.headers && tableData?.rows) {
+          table = { headers: tableData.headers, rows: tableData.rows.map((r: any) => ({ cells: r.cells || [] })) };
+        }
+      }
+
+      h2Sections.push({
+        id: uuidv4(),
+        question: question,
+        intro: sectionData?.intro || '',
+        paragraphs: [],
+        conclusion: sectionData?.conclusion || '',
+        tip: tip,
+        table: table,
+        h3s: h3s,
+        hasProductGrid: false,
+        products: [],
+      });
+    }
+    
+    onProgress('Génération FAQ...', 90);
+
+    const faqPrompt = `4 questions FAQ pour "${h1}". JSON :
+{"faq": [{"question": "?", "answer": "Réponse."}]}`;
+
+    const faqResponse = await callClaude(SYSTEM_PROMPT_LONG, [{ role: 'user', content: faqPrompt }], 1500, true);
+    const faqData = extractJson(faqResponse);
+    
+    const faqItems: FAQItem[] = [];
+    if (faqData?.faq && Array.isArray(faqData.faq)) {
+      for (const item of faqData.faq) {
+        if (item.question && item.answer) {
+          faqItems.push({ question: item.question, answer: item.answer });
+        }
+      }
+    }
+
+    onProgress('Terminé !', 100);
+
+    return {
+      id: articleId,
+      h1,
+      seoTitle,
+      metaDescription,
+      slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
+      intro,
+      anchorText,
+      anchorUrl,
+      h2Sections,
+      faq: faqItems,
+      featuredProducts,
+      blogLinks,
+      status: 'draft',
+      createdAt: new Date().toISOString(),
+    };
+    
+  } catch (error) {
+    console.error('Erreur génération:', error);
+    throw error;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODE MINI ARTICLE (existant)
+// ═══════════════════════════════════════════════════════════════════════════
 export async function generateMiniArticle(
   h1: string,
   anchorText: string,
@@ -289,20 +483,13 @@ export async function generateMiniArticle(
   
   onProgress('Recherche et rédaction...', 30);
 
-  const prompt = `Recherche des informations sur "${h1}" puis écris un article de ${wordCount} mots.
+  const prompt = `Recherche sur "${h1}" puis écris un article de ${wordCount} mots.
+Structure : <p>, <h2>, <ul><li>, <strong>
+Lien à intégrer : <a href="${anchorUrl}">${anchorText}</a>
+${featuredProducts.length > 0 ? `Produit : ${featuredProducts[0].title}` : ''}
+HTML uniquement, pas de JSON.`;
 
-Structure HTML :
-- <p> pour paragraphes avec <strong> sur mots-clés importants
-- <h2> pour 1-2 sous-titres
-- <ul><li> pour une liste de points
-- Intègre ce lien : <a href="${anchorUrl}">${anchorText}</a>
-${featuredProducts.length > 0 ? `- Mentionne : ${featuredProducts[0].title}` : ''}
-
-IMPORTANT : Utilise des informations RÉELLES trouvées sur le web.
-
-Réponds avec UNIQUEMENT le HTML, pas de JSON ni de backticks.`;
-
-  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], deepMode ? 2000 : 1500, true);
+  const response = await callClaude(SYSTEM_PROMPT_SHORT, [{ role: 'user', content: prompt }], deepMode ? 2000 : 1500, true);
   const content = cleanHtml(response);
 
   onProgress('Terminé !', 100);
@@ -311,7 +498,7 @@ Réponds avec UNIQUEMENT le HTML, pas de JSON ni de backticks.`;
     id: articleId,
     h1,
     seoTitle: `${h1.slice(0, 50)} – Livraison gratuite`,
-    metaDescription: `Découvrez ${h1.toLowerCase()}. Guide pratique avec conseils d'expert.`,
+    metaDescription: `Découvrez ${h1.toLowerCase()}. Guide pratique.`,
     slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
     intro: '',
     anchorText,
