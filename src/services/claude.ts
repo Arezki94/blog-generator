@@ -1,6 +1,11 @@
 import { BlogArticle, H2Section, H3Section, FAQItem, FeaturedProduct, BlogLink, Tip, ComparisonTable } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
+// Délai pour éviter le rate limit
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 const PROXY_URL = 'https://claude-proxy-production-496d.up.railway.app';
 
 interface ClaudeMessage {
