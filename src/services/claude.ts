@@ -19,6 +19,8 @@ async function callClaude(
   maxTokens: number = 4096,
   useWebSearch: boolean = false
 ): Promise<string> {
+  // Petit délai pour éviter le rate limit
+  await delay(1000); // 1 seconde entre chaque appel
   const response = await fetch(`${PROXY_URL}/api/claude`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
