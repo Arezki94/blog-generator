@@ -8,7 +8,6 @@ interface ClaudeMessage {
   content: string;
 }
 
-// Délai pour éviter le rate limit (50k tokens/min)
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -19,7 +18,6 @@ async function callClaude(
   maxTokens: number = 4096,
   useWebSearch: boolean = false
 ): Promise<string> {
-  // Délai avant chaque appel pour éviter rate limit
   await delay(2000);
   
   const response = await fetch(`${PROXY_URL}/api/claude`, {
@@ -36,9 +34,8 @@ async function callClaude(
 
   if (!response.ok) {
     const error = await response.text();
-    // Si rate limit, attendre et réessayer une fois
     if (response.status === 429) {
-      console.log('Rate limit atteint, attente 30 secondes...');
+      console.log('Rate limit, attente 30s...');
       await delay(30000);
       return callClaude(systemPrompt, messages, maxTokens, useWebSearch);
     }
@@ -46,74 +43,114 @@ async function callClaude(
   }
 
   const data = await response.json();
-  let text = data.extractedText || data.content?.[0]?.text || '';
-  return text.trim();
+  return (data.extractedText || data.content?.[0]?.text || '').trim();
 }
 
 function cleanHtml(text: string): string {
-  return text
-    .replace(/```html\s*/gi, '')
-    .replace(/```json\s*/gi, '')
-    .replace(/```\s*/g, '')
-    .replace(/`/g, '')
-    .trim();
+  return text.replace(/```html\s*/gi, '').replace(/```json\s*/gi, '').replace(/```\s*/g, '').replace(/`/g, '').trim();
 }
 
 function extractJson(text: string): any {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      return JSON.parse(jsonMatch[0]);
-    } catch {
-      return null;
-    }
+  const match = text.match(/\{[\s\S]*\}/);
+  if (match) {
+    try { return JSON.parse(match[0]); } catch { return null; }
   }
   return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CONNAISSANCES MÉTIER
+// DÉTECTION DU TYPE D'ARTICLE
 // ═══════════════════════════════════════════════════════════════════════════
-const EXPERTISE_MONTAGE_PSA = `
-🔧 MONTAGE PEUGEOT / CITROËN / RENAULT :
-- Système : insert plastique sur tige métallique (pas de vissage)
-- Étapes : 1) Retirer le soufflet vers le bas, 2) Tirer l'ancien pommeau vers le haut, 3) Vérifier l'insert (garder si bon), 4) Emboîter le nouveau en appuyant fort
-- Temps : 2-3 minutes, aucun outil
-`;
+type ArticleType = 'tutorial' | 'buying_guide' | 'comparison' | 'diagnostic' | 'informational';
 
-const EXPERTISE_MONTAGE_BMW = `
-🔧 MONTAGE BMW (1998-2014) :
-- Étapes : 1) Tirer l'ancien vers le haut, 2) Déclipser le plastique console, 3) Connecter câbles (rétroéclairage), 4) Emboîter le nouveau
-- Temps : 5-10 minutes
-`;
-
-function detectExpertise(h1: string): { includePSA: boolean; includeBMW: boolean; isMontage: boolean } {
+function detectArticleType(h1: string): ArticleType {
   const h1Lower = h1.toLowerCase();
-  const montageKeywords = ['monter', 'démonter', 'changer', 'remplacer', 'installer', 'retirer', 'enlever', 'poser', 'mettre', 'montage', 'démontage', 'installation', 'remplacement'];
-  const isMontage = montageKeywords.some(kw => h1Lower.includes(kw));
-  const psaKeywords = ['peugeot', '206', '207', '208', '307', '308', '3008', 'citroën', 'citroen', 'c3', 'c4', 'renault', 'clio', 'megane', 'scenic'];
-  const includePSA = psaKeywords.some(kw => h1Lower.includes(kw));
-  const bmwKeywords = ['bmw', 'e36', 'e46', 'e90', 'e39', 'e60', 'f30', 'série 3', 'série 5'];
-  const includeBMW = bmwKeywords.some(kw => h1Lower.includes(kw));
-  return { includePSA, includeBMW, isMontage };
+  
+  // Tutoriel : comment faire quelque chose
+  if (/comment (changer|monter|installer|remplacer|démonter|retirer|enlever|poser|mettre)/.test(h1Lower)) {
+    return 'tutorial';
+  }
+  
+  // Guide d'achat : quel/meilleur/choisir
+  if (/quel|meilleur|choisir|acheter|trouver/.test(h1Lower)) {
+    return 'buying_guide';
+  }
+  
+  // Comparatif : différence/vs/ou/comparatif
+  if (/différence|vs\b|versus| ou |compara/.test(h1Lower)) {
+    return 'comparison';
+  }
+  
+  // Diagnostic : pourquoi/problème/ne fonctionne pas
+  if (/pourquoi|problème|casse|vibre|bouge|dur|mou|bloqué|coincé|ne (fonctionne|marche)/.test(h1Lower)) {
+    return 'diagnostic';
+  }
+  
+  return 'informational';
 }
 
-function buildSystemPrompt(h1: string, isShortMode: boolean = false): string {
-  const { includePSA, includeBMW, isMontage } = detectExpertise(h1);
-  
-  let expertiseBlock = '';
-  if (isMontage || includePSA || includeBMW) {
-    expertiseBlock = `\nCONNAISSANCES VÉRIFIÉES :\n${includePSA || isMontage ? EXPERTISE_MONTAGE_PSA : ''}${includeBMW ? EXPERTISE_MONTAGE_BMW : ''}`;
+// Structure H2 adaptée au type
+function getH2Structure(type: ArticleType): string {
+  switch (type) {
+    case 'tutorial':
+      return `Structure TUTORIEL (4 H2 avec angles DIFFÉRENTS) :
+- H2 1 : Réponse directe + vue d'ensemble (temps, difficulté, outils)
+- H2 2 : Préparation et précautions AVANT de commencer
+- H2 3 : Étapes détaillées du démontage ET remontage
+- H2 4 : Problèmes courants et solutions (pommeau collé, insert cassé, etc.)`;
+    
+    case 'buying_guide':
+      return `Structure GUIDE D'ACHAT (4 H2 avec angles DIFFÉRENTS) :
+- H2 1 : Critères essentiels pour bien choisir (matériau, compatibilité, style)
+- H2 2 : Les différents types disponibles et leurs caractéristiques
+- H2 3 : Fourchette de prix et rapport qualité/prix
+- H2 4 : Erreurs à éviter lors de l'achat`;
+    
+    case 'comparison':
+      return `Structure COMPARATIF (4 H2 avec angles DIFFÉRENTS) :
+- H2 1 : Présentation des deux options comparées
+- H2 2 : Différences techniques concrètes
+- H2 3 : Avantages et inconvénients de chaque option
+- H2 4 : Notre verdict : lequel choisir selon votre situation`;
+    
+    case 'diagnostic':
+      return `Structure DIAGNOSTIC (4 H2 avec angles DIFFÉRENTS) :
+- H2 1 : Les causes possibles du problème
+- H2 2 : Comment identifier la cause exacte
+- H2 3 : Solutions pour chaque cas
+- H2 4 : Quand faut-il remplacer plutôt que réparer`;
+    
+    default:
+      return `Structure INFORMATIVE (4 H2 avec angles DIFFÉRENTS) :
+- H2 1 : L'essentiel à savoir sur le sujet
+- H2 2 : Approfondissement technique
+- H2 3 : Conseils pratiques et astuces
+- H2 4 : Questions connexes importantes`;
   }
-
-  return `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
-${expertiseBlock}
-RÈGLES : Jamais de "nos/votre/ce/ces". Matériaux honnêtes. Infos UTILES et CONCRÈTES.
-${isShortMode ? 'STYLE : Réponse DIRECTE dès la 1ère phrase. Paragraphes courts. Zéro remplissage.' : ''}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MODE ARTICLE COURT (optimisé pour éviter rate limit)
+// CONNAISSANCES MÉTIER (injectées si pertinent)
+// ═══════════════════════════════════════════════════════════════════════════
+const EXPERTISE_PSA = `MONTAGE PSA (Peugeot/Citroën/Renault) : Insert plastique sur tige métallique. Étapes : 1) Retirer soufflet vers le bas, 2) Tirer ancien pommeau vers le haut, 3) Vérifier insert (garder si bon), 4) Emboîter nouveau en appuyant. Temps : 2-3 min.`;
+const EXPERTISE_BMW = `MONTAGE BMW (1998-2014) : 1) Tirer ancien vers le haut, 2) Déclipser plastique console, 3) Connecter câbles rétroéclairage, 4) Emboîter nouveau. Temps : 5-10 min.`;
+
+function getExpertise(h1: string): string {
+  const h1Lower = h1.toLowerCase();
+  const hasMontage = /changer|monter|installer|remplacer|démonter|retirer/.test(h1Lower);
+  const hasPSA = /peugeot|citro[eë]n|renault|clio|megane|scenic|206|207|208|307|308|c3|c4/.test(h1Lower);
+  const hasBMW = /bmw|e36|e46|e90|e39|e60|série [135]/.test(h1Lower);
+  
+  if (!hasMontage && !hasPSA && !hasBMW) return '';
+  
+  let expertise = '\n\nCONNAISSANCES VÉRIFIÉES (utiliser SI pertinent) :\n';
+  if (hasPSA || hasMontage) expertise += EXPERTISE_PSA + '\n';
+  if (hasBMW) expertise += EXPERTISE_BMW + '\n';
+  return expertise;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MODE ARTICLE COURT (1200-1500 mots, structuré, sans répétitions)
 // ═══════════════════════════════════════════════════════════════════════════
 export async function generateShortArticle(
   h1: string,
@@ -124,120 +161,203 @@ export async function generateShortArticle(
   blogLinks: BlogLink[] = []
 ): Promise<BlogArticle> {
   const articleId = uuidv4();
-  const SYSTEM_PROMPT = buildSystemPrompt(h1, true);
+  const articleType = detectArticleType(h1);
+  const h2Structure = getH2Structure(articleType);
+  const expertise = getExpertise(h1);
   
-  try {
-    // ─── ÉTAPE 1 : Recherche + Plan (AVEC web search) ────────────────────
-    onProgress('Recherche web...', 10);
-    
-    const planPrompt = `Recherche "${h1}" puis JSON uniquement :
-{
-  "seoTitle": "titre 55 car. max – Livraison gratuite",
-  "metaDescription": "RÉPONSE directe 150 car.",
-  "h2Questions": ["question 1?", "question 2?", "question 3?"],
-  "keyFacts": "3-4 faits importants trouvés en ligne"
-}`;
+  const SYSTEM_PROMPT = `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
+${expertise}
+RÈGLES ABSOLUES :
+- Jamais "nos/votre/ce/ces" (possessifs commerciaux interdits)
+- Matériaux honnêtes : "simili-cuir" pas "cuir véritable"
+- JAMAIS répéter ce qui a déjà été dit dans les sections précédentes
+- Chaque section apporte des informations NOUVELLES
+- Style direct, concret, utile`;
 
-    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 800, true);
+  try {
+    // ─── ÉTAPE 1 : Recherche + Planification intelligente ────────────────
+    onProgress('Analyse du sujet...', 5);
+    
+    const planPrompt = `Sujet : "${h1}"
+Type d'article détecté : ${articleType}
+
+${h2Structure}
+
+Recherche des informations puis réponds avec ce JSON :
+{
+  "seoTitle": "titre accrocheur 55 car. max – Livraison gratuite",
+  "metaDescription": "réponse DIRECTE à la question, 150 car. max",
+  "h2Titles": [
+    "H2 1 : titre précis (pas juste reformulation du H1)",
+    "H2 2 : titre avec angle DIFFÉRENT",
+    "H2 3 : titre avec angle DIFFÉRENT",
+    "H2 4 : titre avec angle DIFFÉRENT"
+  ],
+  "keyFacts": "Les 5-6 informations clés trouvées en recherche (200 mots)"
+}
+
+IMPORTANT : Les 4 H2 doivent avoir des ANGLES DIFFÉRENTS, pas des reformulations.`;
+
+    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 1000, true);
     const planData = extractJson(planResponse);
     
     const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
     const metaDescription = planData?.metaDescription || `Découvrez ${h1.toLowerCase()}.`;
-    const h2Questions: string[] = (planData?.h2Questions || []).slice(0, 3);
+    const h2Titles: string[] = planData?.h2Titles || ['Section 1', 'Section 2', 'Section 3', 'Section 4'];
     const keyFacts = planData?.keyFacts || '';
-    
-    while (h2Questions.length < 3) h2Questions.push(`Comment procéder ?`);
 
-    // ─── ÉTAPE 2 : Introduction (SANS web search, utilise keyFacts) ──────
-    onProgress('Rédaction intro...', 30);
+    // ─── ÉTAPE 2 : Introduction percutante ───────────────────────────────
+    onProgress('Introduction...', 15);
 
-    const introPrompt = `Intro 40-60 mots pour "${h1}".
-Infos trouvées : ${keyFacts}
-PREMIÈRE PHRASE = réponse directe.
-Lien : <a href="${anchorUrl}">${anchorText}</a>
-HTML uniquement (<p> avec <strong>).`;
+    const introPrompt = `Écris une introduction de 80-100 mots pour "${h1}".
 
-    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 400, false);
+RÈGLES :
+- PREMIÈRE PHRASE = réponse directe à la question (pas de "Vous vous demandez...")
+- Donner les infos essentielles immédiatement
+- Intégrer naturellement : <a href="${anchorUrl}">${anchorText}</a>
+- Terminer par ce que l'article va couvrir (sans liste à puces)
+
+Contexte : ${keyFacts}
+
+HTML uniquement (<p> avec quelques <strong> sur mots-clés importants).`;
+
+    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 500, false);
     const intro = cleanHtml(introResponse);
 
-    // ─── ÉTAPE 3 : Sections H2 (SANS web search) ─────────────────────────
+    // ─── ÉTAPE 3 : Sections H2 (avec tracking anti-répétition) ───────────
     const h2Sections: H2Section[] = [];
+    let previousContent = ''; // Pour éviter les répétitions
     
-    for (let i = 0; i < 3; i++) {
-      const question = h2Questions[i];
-      onProgress(`Section ${i + 1}/3...`, 40 + (i * 15));
+    for (let i = 0; i < 4; i++) {
+      const h2Title = h2Titles[i] || `Section ${i + 1}`;
+      onProgress(`Section ${i + 1}/4...`, 25 + (i * 17));
       
-      let extraContext = '';
+      let extraInstructions = '';
       if (i === 0 && featuredProducts.length > 0) {
-        extraContext = `\nMentionne : "${featuredProducts[0].title}" (${featuredProducts[0].url})`;
+        extraInstructions = `\nMentionne naturellement : "${featuredProducts[0].title}" (${featuredProducts[0].url})`;
       }
-      if (i === 1 && blogLinks.length > 0) {
-        extraContext = `\nLien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
+      if (i === 2 && blogLinks.length > 0) {
+        extraInstructions = `\nIntègre ce lien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
       }
 
-      const sectionPrompt = `Section "${question}". Infos : ${keyFacts}
-JSON :
+      const sectionPrompt = `Écris la section "${h2Title}" pour l'article "${h1}".
+
+CONTEXTE RECHERCHE : ${keyFacts}
+
+DÉJÀ COUVERT (NE PAS RÉPÉTER) :
+${previousContent || '(Rien encore)'}
+
+OBJECTIF : 250-350 mots de contenu NOUVEAU et UTILE.
+
+Réponds avec ce JSON :
 {
-  "h3": {"title": "Sous-titre", "content": "<p>Réponse 2-3 phrases.</p><ul><li>Point 1</li><li>Point 2</li></ul>"},
-  "tip": "Conseil 1 phrase ou null"
+  "h3s": [
+    {
+      "title": "Sous-titre H3 pertinent",
+      "content": "<p>Paragraphe détaillé avec <strong>mots-clés</strong>...</p><p>Deuxième paragraphe si besoin...</p><ul><li>Point 1</li><li>Point 2</li><li>Point 3</li></ul>"
+    },
+    {
+      "title": "Autre sous-titre H3 (si pertinent)",
+      "content": "<p>Contenu complémentaire...</p>"
+    }
+  ],
+  "tip": "Conseil pratique UNIQUE et utile (ou null)",
+  "summary": "Résumé en 1 phrase de ce qui a été couvert (pour éviter répétitions)"
 }
-80 mots MAX.${extraContext}`;
+${extraInstructions}
 
-      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 600, false);
+IMPORTANT : Le contenu doit être SUBSTANTIEL (250-350 mots), pas juste 2-3 phrases.`;
+
+      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 1200, false);
       const sectionData = extractJson(sectionResponse);
       
+      // Mettre à jour le tracking
+      if (sectionData?.summary) {
+        previousContent += `- ${h2Title} : ${sectionData.summary}\n`;
+      }
+      
       const h3s: H3Section[] = [];
-      if (sectionData?.h3) {
-        h3s.push({ id: uuidv4(), title: sectionData.h3.title || '', content: cleanHtml(sectionData.h3.content || '') });
+      if (sectionData?.h3s && Array.isArray(sectionData.h3s)) {
+        for (const h3 of sectionData.h3s) {
+          if (h3.title && h3.content) {
+            h3s.push({ id: uuidv4(), title: h3.title, content: cleanHtml(h3.content) });
+          }
+        }
       }
       
       let tip: Tip | null = null;
-      if (sectionData?.tip && sectionData.tip.length > 10) {
+      if (sectionData?.tip && sectionData.tip.length > 15) {
         tip = { text: sectionData.tip };
       }
 
-      // Tableau section 2 seulement
+      // Tableau pour section 2 ou 3
       let table: ComparisonTable | null = null;
-      if (i === 1) {
-        const tablePrompt = `Tableau comparatif "${question}". JSON :
-{"headers": ["", "A", "B"], "rows": [{"cells": ["Critère", "val", "val"]}]}
-2 lignes max.`;
-        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 300, false);
+      if (i === 1 || i === 2) {
+        const tablePrompt = `Tableau comparatif pertinent pour "${h2Title}".
+JSON : {"headers": ["Critère", "Option A", "Option B"], "rows": [{"cells": ["val", "val", "val"]}]}
+3-4 lignes avec données CONCRÈTES et UTILES.`;
+        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 400, false);
         const tableData = extractJson(tableResponse);
-        if (tableData?.headers && tableData?.rows) {
-          table = { headers: tableData.headers, rows: tableData.rows.slice(0, 2).map((r: any) => ({ cells: r.cells || [] })) };
+        if (tableData?.headers && tableData?.rows?.length > 0) {
+          table = { headers: tableData.headers, rows: tableData.rows.slice(0, 4).map((r: any) => ({ cells: r.cells || [] })) };
         }
       }
 
       h2Sections.push({
-        id: uuidv4(), question, intro: '', paragraphs: [], conclusion: '',
-        tip, table, h3s, hasProductGrid: false, products: [],
+        id: uuidv4(),
+        question: h2Title,
+        intro: '',
+        paragraphs: [],
+        conclusion: '',
+        tip,
+        table,
+        h3s,
+        hasProductGrid: false,
+        products: [],
       });
     }
     
-    // ─── ÉTAPE 4 : FAQ (SANS web search) ─────────────────────────────────
-    onProgress('FAQ...', 90);
+    // ─── ÉTAPE 4 : FAQ (questions DIFFÉRENTES) ───────────────────────────
+    onProgress('FAQ...', 92);
 
-    const faqPrompt = `2 FAQ pour "${h1}". JSON :
-{"faq": [{"question": "?", "answer": "Réponse 1-2 phrases."}]}`;
+    const faqPrompt = `3 questions FAQ pour "${h1}".
 
-    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 400, false);
+DÉJÀ COUVERT DANS L'ARTICLE :
+${previousContent}
+
+Génère 3 questions DIFFÉRENTES de ce qui a été couvert.
+
+JSON : {"faq": [{"question": "Question ?", "answer": "Réponse complète en 2-3 phrases."}]}`;
+
+    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 600, false);
     const faqData = extractJson(faqResponse);
     
     const faqItems: FAQItem[] = [];
     if (faqData?.faq) {
-      for (const item of faqData.faq.slice(0, 2)) {
-        if (item.question && item.answer) faqItems.push({ question: item.question, answer: item.answer });
+      for (const item of faqData.faq.slice(0, 3)) {
+        if (item.question && item.answer) {
+          faqItems.push({ question: item.question, answer: item.answer });
+        }
       }
     }
 
     onProgress('Terminé !', 100);
 
     return {
-      id: articleId, h1, seoTitle, metaDescription,
+      id: articleId,
+      h1,
+      seoTitle,
+      metaDescription,
       slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
-      intro, anchorText, anchorUrl, h2Sections, faq: faqItems,
-      featuredProducts, blogLinks, status: 'draft', createdAt: new Date().toISOString(),
+      intro,
+      anchorText,
+      anchorUrl,
+      h2Sections,
+      faq: faqItems,
+      featuredProducts,
+      blogLinks,
+      status: 'draft',
+      createdAt: new Date().toISOString(),
     };
     
   } catch (error) {
@@ -247,7 +367,7 @@ JSON :
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MODE ARTICLE COMPLET (optimisé)
+// MODE ARTICLE COMPLET (garde la même logique améliorée)
 // ═══════════════════════════════════════════════════════════════════════════
 export async function generateArticleWithClaude(
   h1: string,
@@ -260,80 +380,85 @@ export async function generateArticleWithClaude(
   blogLinks: BlogLink[] = []
 ): Promise<BlogArticle> {
   const articleId = uuidv4();
-  const SYSTEM_PROMPT = buildSystemPrompt(h1, false);
+  const articleType = detectArticleType(h1);
+  const expertise = getExpertise(h1);
   
+  const SYSTEM_PROMPT = `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
+${expertise}
+RÈGLES : Jamais "nos/votre/ce/ces". Matériaux honnêtes. Ne jamais répéter. Contenu utile et concret.`;
+
   try {
-    // ─── Recherche initiale (AVEC web search) ────────────────────────────
-    onProgress('Recherche web...', 5);
+    onProgress('Recherche...', 5);
     
-    const researchPrompt = `Recherche "${h1}" et donne JSON :
-{
-  "seoTitle": "titre 55 car. – Livraison gratuite",
-  "metaDescription": "description 150 car.",
-  "h2Questions": ["q1?", "q2?", "q3?", "q4?", "q5?", "q6?"],
-  "keyFacts": "Résumé des infos importantes trouvées (200 mots max)"
+    const planPrompt = `Sujet : "${h1}" (type: ${articleType})
+Génère ${h2Count} questions H2 avec des ANGLES TOUS DIFFÉRENTS.
+JSON : {
+  "seoTitle": "55 car. – Livraison gratuite",
+  "metaDescription": "150 car.",
+  "h2Titles": ["H2 1", "H2 2", ...],
+  "keyFacts": "Infos clés recherchées"
 }`;
 
-    const researchResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: researchPrompt }], 1000, true);
-    const researchData = extractJson(researchResponse);
+    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 1000, true);
+    const planData = extractJson(planResponse);
     
-    const seoTitle = researchData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
-    const metaDescription = researchData?.metaDescription || `Découvrez ${h1.toLowerCase()}.`;
-    const h2Questions: string[] = (researchData?.h2Questions || []).slice(0, h2Count);
-    const keyFacts = researchData?.keyFacts || '';
+    const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
+    const metaDescription = planData?.metaDescription || `Découvrez ${h1.toLowerCase()}.`;
+    const h2Titles: string[] = (planData?.h2Titles || []).slice(0, h2Count);
+    const keyFacts = planData?.keyFacts || '';
     
-    while (h2Questions.length < h2Count) h2Questions.push(`Comment choisir ?`);
+    while (h2Titles.length < h2Count) h2Titles.push(`Section ${h2Titles.length + 1}`);
 
-    // ─── Introduction (SANS web search) ──────────────────────────────────
-    onProgress('Introduction...', 15);
+    onProgress('Introduction...', 12);
 
-    const introPrompt = `Intro 80-100 mots pour "${h1}".
-Infos : ${keyFacts}
+    const introPrompt = `Intro 80-100 mots pour "${h1}". Réponse directe en 1ère phrase.
 Lien : <a href="${anchorUrl}">${anchorText}</a>
+Contexte : ${keyFacts}
 HTML uniquement.`;
 
-    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 600, false);
+    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 500, false);
     const intro = cleanHtml(introResponse);
 
-    // ─── Sections (SANS web search, utilise keyFacts) ────────────────────
     const h2Sections: H2Section[] = [];
-    const progressPerSection = 60 / h2Count;
+    let previousContent = '';
+    const progressPerSection = 65 / h2Count;
     
     for (let i = 0; i < h2Count; i++) {
-      const question = h2Questions[i];
-      onProgress(`Section ${i + 1}/${h2Count}...`, 20 + (i * progressPerSection));
+      const h2Title = h2Titles[i];
+      onProgress(`Section ${i + 1}/${h2Count}...`, 18 + (i * progressPerSection));
       
-      let extraContext = '';
-      if (i === 0 && featuredProducts.length > 0) extraContext = `\nProduit : "${featuredProducts[0].title}" (${featuredProducts[0].url})`;
-      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) extraContext = `\nLien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
+      let extra = '';
+      if (i === 0 && featuredProducts.length > 0) extra = `\nProduit : "${featuredProducts[0].title}" (${featuredProducts[0].url})`;
+      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) extra = `\nLien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
 
-      const sectionPrompt = `Section "${question}". Contexte : ${keyFacts}
-JSON :
-{
-  "intro": "1-2 phrases",
-  "h3s": [{"title": "Sous-titre", "content": "<p>Contenu utile.</p>"}],
-  "tip": "Conseil ou null",
-  "conclusion": "1 phrase"
-}${extraContext}`;
+      const sectionPrompt = `Section "${h2Title}" pour "${h1}".
+Contexte : ${keyFacts}
+Déjà couvert : ${previousContent || '(Rien)'}
+JSON : {
+  "h3s": [{"title": "...", "content": "<p>...</p>"}],
+  "tip": "conseil ou null",
+  "summary": "résumé 1 phrase"
+}
+200-300 mots de contenu NOUVEAU.${extra}`;
 
-      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 800, false);
+      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 1000, false);
       const sectionData = extractJson(sectionResponse);
+      
+      if (sectionData?.summary) previousContent += `- ${h2Title}: ${sectionData.summary}\n`;
       
       const h3s: H3Section[] = [];
       if (sectionData?.h3s) {
         for (const h3 of sectionData.h3s) {
-          h3s.push({ id: uuidv4(), title: h3.title || '', content: cleanHtml(h3.content || '') });
+          if (h3.title && h3.content) h3s.push({ id: uuidv4(), title: h3.title, content: cleanHtml(h3.content) });
         }
       }
       
       let tip: Tip | null = null;
-      if (sectionData?.tip && sectionData.tip.length > 10) tip = { text: sectionData.tip };
+      if (sectionData?.tip && sectionData.tip.length > 15) tip = { text: sectionData.tip };
       
       let table: ComparisonTable | null = null;
       if (i === 1 || i === 3) {
-        const tablePrompt = `Tableau "${question}". JSON :
-{"headers": ["Critère", "A", "B"], "rows": [{"cells": ["x", "y", "z"]}]}`;
-        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 400, false);
+        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: `Tableau pour "${h2Title}". JSON: {"headers":["A","B","C"],"rows":[{"cells":["x","y","z"]}]}` }], 400, false);
         const tableData = extractJson(tableResponse);
         if (tableData?.headers && tableData?.rows) {
           table = { headers: tableData.headers, rows: tableData.rows.map((r: any) => ({ cells: r.cells || [] })) };
@@ -341,18 +466,14 @@ JSON :
       }
 
       h2Sections.push({
-        id: uuidv4(), question, intro: sectionData?.intro || '', paragraphs: [],
-        conclusion: sectionData?.conclusion || '', tip, table, h3s, hasProductGrid: false, products: [],
+        id: uuidv4(), question: h2Title, intro: '', paragraphs: [], conclusion: '',
+        tip, table, h3s, hasProductGrid: false, products: [],
       });
     }
     
-    // ─── FAQ (SANS web search) ───────────────────────────────────────────
     onProgress('FAQ...', 90);
 
-    const faqPrompt = `4 FAQ "${h1}". JSON :
-{"faq": [{"question": "?", "answer": "Réponse utile."}]}`;
-
-    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 600, false);
+    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: `4 FAQ "${h1}" DIFFÉRENTES de : ${previousContent}\nJSON: {"faq":[{"question":"?","answer":"..."}]}` }], 700, false);
     const faqData = extractJson(faqResponse);
     
     const faqItems: FAQItem[] = [];
@@ -372,7 +493,7 @@ JSON :
     };
     
   } catch (error) {
-    console.error('Erreur génération:', error);
+    console.error('Erreur:', error);
     throw error;
   }
 }
@@ -391,26 +512,23 @@ export async function generateMiniArticle(
   blogLinks: BlogLink[] = []
 ): Promise<BlogArticle> {
   const articleId = uuidv4();
-  const SYSTEM_PROMPT = buildSystemPrompt(h1, true);
+  const expertise = getExpertise(h1);
   
-  // Une seule recherche web au début
+  const SYSTEM_PROMPT = `Expert pommeaux de vitesse. ${expertise} Règles : pas de possessifs commerciaux, matériaux honnêtes.`;
+  
   onProgress('Recherche...', 20);
-
-  const researchPrompt = `Recherche "${h1}" et résume les infos clés en 100 mots.`;
-  const research = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: researchPrompt }], 400, true);
+  const research = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: `Recherche "${h1}" et résume les infos clés en 100 mots.` }], 400, true);
 
   onProgress('Rédaction...', 50);
-
   const prompt = `Article ${wordCount} mots sur "${h1}".
-Infos recherchées : ${research}
-Structure : <p>, <h2>, <ul><li>, <strong>
+Infos : ${research}
+Structure : <p>, <h2>, <ul>, <strong>
 Lien : <a href="${anchorUrl}">${anchorText}</a>
 ${featuredProducts.length > 0 ? `Produit : ${featuredProducts[0].title}` : ''}
-HTML uniquement.`;
+HTML uniquement. Contenu UTILE, pas de remplissage.`;
 
-  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], 1200, false);
-  const content = cleanHtml(response);
-
+  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], 1500, false);
+  
   onProgress('Terminé !', 100);
 
   return {
@@ -420,6 +538,6 @@ HTML uniquement.`;
     slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
     intro: '', anchorText, anchorUrl, h2Sections: [], faq: [],
     featuredProducts, blogLinks, status: 'draft', createdAt: new Date().toISOString(),
-    isMini: true, miniContent: content, miniWordCount: wordCount,
+    isMini: true, miniContent: cleanHtml(response), miniWordCount: wordCount,
   };
 }
