@@ -1,16 +1,16 @@
 import { BlogArticle, H2Section, H3Section, FAQItem, FeaturedProduct, BlogLink, Tip, ComparisonTable } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
-// Délai pour éviter le rate limit
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 const PROXY_URL = 'https://claude-proxy-production-496d.up.railway.app';
 
 interface ClaudeMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+// Délai pour éviter le rate limit (50k tokens/min)
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function callClaude(
@@ -19,8 +19,9 @@ async function callClaude(
   maxTokens: number = 4096,
   useWebSearch: boolean = false
 ): Promise<string> {
-  // Petit délai pour éviter le rate limit
-  await delay(1000); // 1 seconde entre chaque appel
+  // Délai avant chaque appel pour éviter rate limit
+  await delay(2000);
+  
   const response = await fetch(`${PROXY_URL}/api/claude`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -35,6 +36,12 @@ async function callClaude(
 
   if (!response.ok) {
     const error = await response.text();
+    // Si rate limit, attendre et réessayer une fois
+    if (response.status === 429) {
+      console.log('Rate limit atteint, attente 30 secondes...');
+      await delay(30000);
+      return callClaude(systemPrompt, messages, maxTokens, useWebSearch);
+    }
     throw new Error(`Claude API error: ${response.status} - ${error}`);
   }
 
@@ -65,93 +72,48 @@ function extractJson(text: string): any {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CONNAISSANCES MÉTIER (injectées uniquement si pertinent)
+// CONNAISSANCES MÉTIER
 // ═══════════════════════════════════════════════════════════════════════════
 const EXPERTISE_MONTAGE_PSA = `
-🔧 MONTAGE PEUGEOT / CITROËN / RENAULT (vérifié) :
+🔧 MONTAGE PEUGEOT / CITROËN / RENAULT :
 - Système : insert plastique sur tige métallique (pas de vissage)
-- Étapes : 
-  1. Retirer le soufflet en le tirant vers le bas
-  2. Tirer fermement l'ancien pommeau vers le haut
-  3. Vérifier l'insert plastique — le garder s'il est bon, sinon le remplacer
-  4. Emboîter le nouveau pommeau en appuyant fort
-- Aucun outil nécessaire
-- Temps : 2-3 minutes
+- Étapes : 1) Retirer le soufflet vers le bas, 2) Tirer l'ancien pommeau vers le haut, 3) Vérifier l'insert (garder si bon), 4) Emboîter le nouveau en appuyant fort
+- Temps : 2-3 minutes, aucun outil
 `;
 
 const EXPERTISE_MONTAGE_BMW = `
-🔧 MONTAGE BMW (1998-2014, vérifié) :
-- Étapes :
-  1. Tirer l'ancien pommeau vers le haut fermement
-  2. Déclipser le plastique de la console centrale si nécessaire
-  3. Connecter les câbles inclus (pour rétroéclairage si applicable)
-  4. Emboîter le nouveau pommeau de force
+🔧 MONTAGE BMW (1998-2014) :
+- Étapes : 1) Tirer l'ancien vers le haut, 2) Déclipser le plastique console, 3) Connecter câbles (rétroéclairage), 4) Emboîter le nouveau
 - Temps : 5-10 minutes
 `;
 
-// Détecte si le sujet nécessite les connaissances métier
 function detectExpertise(h1: string): { includePSA: boolean; includeBMW: boolean; isMontage: boolean } {
   const h1Lower = h1.toLowerCase();
-  
-  // Mots-clés de montage/démontage
   const montageKeywords = ['monter', 'démonter', 'changer', 'remplacer', 'installer', 'retirer', 'enlever', 'poser', 'mettre', 'montage', 'démontage', 'installation', 'remplacement'];
   const isMontage = montageKeywords.some(kw => h1Lower.includes(kw));
-  
-  // Marques PSA
-  const psaKeywords = ['peugeot', '106', '206', '207', '208', '306', '307', '308', '406', '407', '408', '508', '2008', '3008', '5008', 'citroën', 'citroen', 'c1', 'c2', 'c3', 'c4', 'c5', 'ds3', 'ds4', 'ds5', 'renault', 'clio', 'megane', 'mégane', 'scenic', 'scénic', 'laguna', 'twingo', 'captur', 'kadjar'];
+  const psaKeywords = ['peugeot', '206', '207', '208', '307', '308', '3008', 'citroën', 'citroen', 'c3', 'c4', 'renault', 'clio', 'megane', 'scenic'];
   const includePSA = psaKeywords.some(kw => h1Lower.includes(kw));
-  
-  // BMW
-  const bmwKeywords = ['bmw', 'e30', 'e36', 'e46', 'e90', 'e91', 'e92', 'e93', 'f30', 'f31', 'e39', 'e60', 'e61', 'f10', 'f11', 'série 1', 'série 3', 'série 5', 'serie 1', 'serie 3', 'serie 5'];
+  const bmwKeywords = ['bmw', 'e36', 'e46', 'e90', 'e39', 'e60', 'f30', 'série 3', 'série 5'];
   const includeBMW = bmwKeywords.some(kw => h1Lower.includes(kw));
-  
   return { includePSA, includeBMW, isMontage };
 }
 
-// Construit le prompt système adapté au sujet
 function buildSystemPrompt(h1: string, isShortMode: boolean = false): string {
   const { includePSA, includeBMW, isMontage } = detectExpertise(h1);
   
   let expertiseBlock = '';
-  
   if (isMontage || includePSA || includeBMW) {
-    expertiseBlock = `
-CONNAISSANCES MÉTIER VÉRIFIÉES (à utiliser SI le sujet concerne le montage/démontage) :
-${includePSA || isMontage ? EXPERTISE_MONTAGE_PSA : ''}
-${includeBMW ? EXPERTISE_MONTAGE_BMW : ''}
-⚠️ IMPORTANT : Croise ces infos avec ta recherche web pour confirmer/compléter selon le modèle exact.
-`;
+    expertiseBlock = `\nCONNAISSANCES VÉRIFIÉES :\n${includePSA || isMontage ? EXPERTISE_MONTAGE_PSA : ''}${includeBMW ? EXPERTISE_MONTAGE_BMW : ''}`;
   }
-
-  const styleBlock = isShortMode ? `
-STYLE D'ÉCRITURE - ARTICLE COURT ET EFFICACE :
-- RÉPONDRE À LA QUESTION DÈS LA PREMIÈRE PHRASE (pas d'intro générale)
-- Paragraphes de 2-3 lignes MAX
-- Aller droit au but, zéro remplissage
-- Ton direct et pratique
-- Utiliser des listes pour les étapes
-- Gras sur les mots-clés importants
-` : `
-STYLE D'ÉCRITURE - ARTICLE COMPLET :
-- Introduction qui pose le contexte
-- Sections détaillées avec exemples
-- Tableaux comparatifs
-- Conseils pratiques
-- FAQ complète
-`;
 
   return `Tu es un expert en pommeaux de vitesse pour pommeaudevitesse.com.
 ${expertiseBlock}
-${styleBlock}
-RÈGLES STRICTES :
-- JAMAIS de possessifs commerciaux : "ce", "ces", "nos", "notre", "votre", "vos"
-- Matériaux honnêtes : "simili-cuir" jamais "cuir véritable"
-- Utilise la recherche web pour trouver des informations RÉELLES et à jour
-- Donne des infos UTILES et CONCRÈTES, pas de généralités`;
+RÈGLES : Jamais de "nos/votre/ce/ces". Matériaux honnêtes. Infos UTILES et CONCRÈTES.
+${isShortMode ? 'STYLE : Réponse DIRECTE dès la 1ère phrase. Paragraphes courts. Zéro remplissage.' : ''}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MODE ARTICLE COURT (400-700 mots) — Réponse directe
+// MODE ARTICLE COURT (optimisé pour éviter rate limit)
 // ═══════════════════════════════════════════════════════════════════════════
 export async function generateShortArticle(
   h1: string,
@@ -165,170 +127,117 @@ export async function generateShortArticle(
   const SYSTEM_PROMPT = buildSystemPrompt(h1, true);
   
   try {
-    // ─── ÉTAPE 1 : Recherche web + Planification ─────────────────────────
+    // ─── ÉTAPE 1 : Recherche + Plan (AVEC web search) ────────────────────
     onProgress('Recherche web...', 10);
     
-    const planPrompt = `Recherche des informations sur "${h1}" puis réponds UNIQUEMENT avec ce JSON :
+    const planPrompt = `Recherche "${h1}" puis JSON uniquement :
 {
-  "seoTitle": "titre accrocheur max 55 car. – Livraison gratuite",
-  "metaDescription": "RÉPONSE DIRECTE à la question en 150 car. max",
-  "h2Questions": ["question pratique 1 ?", "question pratique 2 ?", "question pratique 3 ?"]
-}
+  "seoTitle": "titre 55 car. max – Livraison gratuite",
+  "metaDescription": "RÉPONSE directe 150 car.",
+  "h2Questions": ["question 1?", "question 2?", "question 3?"],
+  "keyFacts": "3-4 faits importants trouvés en ligne"
+}`;
 
-La meta description doit RÉPONDRE à la question, pas la reformuler.
-Seulement 3 questions H2, les plus utiles.`;
-
-    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 1000, true);
+    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 800, true);
     const planData = extractJson(planResponse);
     
     const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
-    const metaDescription = planData?.metaDescription || `Découvrez ${h1.toLowerCase()}. Réponse directe.`;
+    const metaDescription = planData?.metaDescription || `Découvrez ${h1.toLowerCase()}.`;
     const h2Questions: string[] = (planData?.h2Questions || []).slice(0, 3);
+    const keyFacts = planData?.keyFacts || '';
     
-    while (h2Questions.length < 3) {
-      h2Questions.push(`Comment procéder ?`);
-    }
+    while (h2Questions.length < 3) h2Questions.push(`Comment procéder ?`);
 
-    // ─── ÉTAPE 2 : Introduction DIRECTE ──────────────────────────────────
-    onProgress('Rédaction intro directe...', 25);
+    // ─── ÉTAPE 2 : Introduction (SANS web search, utilise keyFacts) ──────
+    onProgress('Rédaction intro...', 30);
 
-    const introPrompt = `Écris une intro de 40-60 mots pour "${h1}".
+    const introPrompt = `Intro 40-60 mots pour "${h1}".
+Infos trouvées : ${keyFacts}
+PREMIÈRE PHRASE = réponse directe.
+Lien : <a href="${anchorUrl}">${anchorText}</a>
+HTML uniquement (<p> avec <strong>).`;
 
-RÈGLE D'OR : La PREMIÈRE PHRASE doit RÉPONDRE à la question.
-
-Exemple de bon style :
-"Tirez fermement vers le haut — le pommeau 207 s'emboîte sur un insert plastique, aucun outil requis. L'opération prend 2-3 minutes..."
-
-Inclure ce lien naturellement : <a href="${anchorUrl}">${anchorText}</a>
-
-Réponds avec UNIQUEMENT le HTML (<p> avec <strong> sur 2-3 mots-clés). Pas de JSON.`;
-
-    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 600, true);
+    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 400, false);
     const intro = cleanHtml(introResponse);
 
-    // ─── ÉTAPE 3 : Sections H2 courtes ───────────────────────────────────
+    // ─── ÉTAPE 3 : Sections H2 (SANS web search) ─────────────────────────
     const h2Sections: H2Section[] = [];
     
     for (let i = 0; i < 3; i++) {
       const question = h2Questions[i];
-      onProgress(`Section ${i + 1}/3...`, 35 + (i * 18));
+      onProgress(`Section ${i + 1}/3...`, 40 + (i * 15));
       
       let extraContext = '';
       if (i === 0 && featuredProducts.length > 0) {
-        extraContext += `\nMentionne ce produit naturellement : "${featuredProducts[0].title}" (lien: ${featuredProducts[0].url})`;
+        extraContext = `\nMentionne : "${featuredProducts[0].title}" (${featuredProducts[0].url})`;
       }
       if (i === 1 && blogLinks.length > 0) {
-        extraContext += `\nIntègre ce lien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
+        extraContext = `\nLien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
       }
 
-      const sectionPrompt = `Recherche sur "${question}" puis réponds UNIQUEMENT avec ce JSON :
+      const sectionPrompt = `Section "${question}". Infos : ${keyFacts}
+JSON :
 {
-  "h3": {
-    "title": "Sous-titre court et pratique",
-    "content": "<p>Réponse directe en 2-3 phrases max avec <strong>mots-clés</strong>.</p><ul><li>Étape/point 1</li><li>Étape/point 2</li><li>Étape/point 3</li></ul>"
-  },
-  "tip": "Conseil pratique en 1 phrase (ou null si pas pertinent)"
+  "h3": {"title": "Sous-titre", "content": "<p>Réponse 2-3 phrases.</p><ul><li>Point 1</li><li>Point 2</li></ul>"},
+  "tip": "Conseil 1 phrase ou null"
 }
+80 mots MAX.${extraContext}`;
 
-IMPORTANT : 
-- Réponse DIRECTE et UTILE
-- 80 mots MAX pour le contenu
-- Infos RÉELLES trouvées en ligne${extraContext}`;
-
-      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 900, true);
+      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 600, false);
       const sectionData = extractJson(sectionResponse);
       
       const h3s: H3Section[] = [];
       if (sectionData?.h3) {
-        h3s.push({
-          id: uuidv4(),
-          title: sectionData.h3.title || '',
-          content: cleanHtml(sectionData.h3.content || ''),
-        });
+        h3s.push({ id: uuidv4(), title: sectionData.h3.title || '', content: cleanHtml(sectionData.h3.content || '') });
       }
       
       let tip: Tip | null = null;
-      if (sectionData?.tip && typeof sectionData.tip === 'string' && sectionData.tip.length > 10) {
+      if (sectionData?.tip && sectionData.tip.length > 10) {
         tip = { text: sectionData.tip };
       }
 
-      // Tableau seulement pour la section 2
+      // Tableau section 2 seulement
       let table: ComparisonTable | null = null;
       if (i === 1) {
-        const tablePrompt = `Tableau comparatif COURT pour "${question}". JSON uniquement :
-{
-  "headers": ["", "Option A", "Option B"],
-  "rows": [
-    {"cells": ["Critère 1", "valeur", "valeur"]},
-    {"cells": ["Critère 2", "valeur", "valeur"]}
-  ]
-}
-2-3 lignes MAX. Données RÉELLES.`;
-        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 500, true);
+        const tablePrompt = `Tableau comparatif "${question}". JSON :
+{"headers": ["", "A", "B"], "rows": [{"cells": ["Critère", "val", "val"]}]}
+2 lignes max.`;
+        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 300, false);
         const tableData = extractJson(tableResponse);
         if (tableData?.headers && tableData?.rows) {
-          table = {
-            headers: tableData.headers,
-            rows: tableData.rows.slice(0, 3).map((r: any) => ({ cells: r.cells || [] })),
-          };
+          table = { headers: tableData.headers, rows: tableData.rows.slice(0, 2).map((r: any) => ({ cells: r.cells || [] })) };
         }
       }
 
       h2Sections.push({
-        id: uuidv4(),
-        question: question,
-        intro: '',
-        paragraphs: [],
-        conclusion: '',
-        tip: tip,
-        table: table,
-        h3s: h3s,
-        hasProductGrid: false,
-        products: [],
+        id: uuidv4(), question, intro: '', paragraphs: [], conclusion: '',
+        tip, table, h3s, hasProductGrid: false, products: [],
       });
     }
     
-    // ─── ÉTAPE 4 : FAQ courte (2 questions) ──────────────────────────────
-    onProgress('FAQ rapide...', 92);
+    // ─── ÉTAPE 4 : FAQ (SANS web search) ─────────────────────────────────
+    onProgress('FAQ...', 90);
 
-    const faqPrompt = `2 questions FAQ utiles pour "${h1}". JSON uniquement :
-{
-  "faq": [
-    {"question": "Question pratique ?", "answer": "Réponse en 1-2 phrases."},
-    {"question": "Question pratique ?", "answer": "Réponse en 1-2 phrases."}
-  ]
-}
-Réponses CONCRÈTES basées sur la recherche web.`;
+    const faqPrompt = `2 FAQ pour "${h1}". JSON :
+{"faq": [{"question": "?", "answer": "Réponse 1-2 phrases."}]}`;
 
-    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 600, true);
+    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 400, false);
     const faqData = extractJson(faqResponse);
     
     const faqItems: FAQItem[] = [];
-    if (faqData?.faq && Array.isArray(faqData.faq)) {
+    if (faqData?.faq) {
       for (const item of faqData.faq.slice(0, 2)) {
-        if (item.question && item.answer) {
-          faqItems.push({ question: item.question, answer: item.answer });
-        }
+        if (item.question && item.answer) faqItems.push({ question: item.question, answer: item.answer });
       }
     }
 
     onProgress('Terminé !', 100);
 
     return {
-      id: articleId,
-      h1,
-      seoTitle,
-      metaDescription,
+      id: articleId, h1, seoTitle, metaDescription,
       slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
-      intro,
-      anchorText,
-      anchorUrl,
-      h2Sections,
-      faq: faqItems,
-      featuredProducts,
-      blogLinks,
-      status: 'draft',
-      createdAt: new Date().toISOString(),
+      intro, anchorText, anchorUrl, h2Sections, faq: faqItems,
+      featuredProducts, blogLinks, status: 'draft', createdAt: new Date().toISOString(),
     };
     
   } catch (error) {
@@ -338,7 +247,7 @@ Réponses CONCRÈTES basées sur la recherche web.`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MODE ARTICLE COMPLET (avec recherche web)
+// MODE ARTICLE COMPLET (optimisé)
 // ═══════════════════════════════════════════════════════════════════════════
 export async function generateArticleWithClaude(
   h1: string,
@@ -354,36 +263,39 @@ export async function generateArticleWithClaude(
   const SYSTEM_PROMPT = buildSystemPrompt(h1, false);
   
   try {
-    onProgress('Recherche et planification...', 5);
+    // ─── Recherche initiale (AVEC web search) ────────────────────────────
+    onProgress('Recherche web...', 5);
     
-    const planPrompt = `Recherche sur "${h1}" puis réponds UNIQUEMENT avec ce JSON :
+    const researchPrompt = `Recherche "${h1}" et donne JSON :
 {
-  "seoTitle": "titre max 55 caractères – Livraison gratuite",
-  "metaDescription": "description utile max 150 caractères",
-  "h2Questions": ["question 1 ?", "question 2 ?", "question 3 ?", "question 4 ?", "question 5 ?", "question 6 ?"]
-}
-Questions basées sur ce que les gens cherchent vraiment.`;
+  "seoTitle": "titre 55 car. – Livraison gratuite",
+  "metaDescription": "description 150 car.",
+  "h2Questions": ["q1?", "q2?", "q3?", "q4?", "q5?", "q6?"],
+  "keyFacts": "Résumé des infos importantes trouvées (200 mots max)"
+}`;
 
-    const planResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: planPrompt }], 1500, true);
-    const planData = extractJson(planResponse);
+    const researchResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: researchPrompt }], 1000, true);
+    const researchData = extractJson(researchResponse);
     
-    const seoTitle = planData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
-    const metaDescription = planData?.metaDescription || `Découvrez ${h1.toLowerCase()}. Guide complet.`;
-    const h2Questions: string[] = planData?.h2Questions?.slice(0, h2Count) || [];
+    const seoTitle = researchData?.seoTitle || `${h1.slice(0, 50)} – Livraison gratuite`;
+    const metaDescription = researchData?.metaDescription || `Découvrez ${h1.toLowerCase()}.`;
+    const h2Questions: string[] = (researchData?.h2Questions || []).slice(0, h2Count);
+    const keyFacts = researchData?.keyFacts || '';
     
-    while (h2Questions.length < h2Count) {
-      h2Questions.push(`Comment choisir ?`);
-    }
+    while (h2Questions.length < h2Count) h2Questions.push(`Comment choisir ?`);
 
-    onProgress('Rédaction introduction...', 15);
+    // ─── Introduction (SANS web search) ──────────────────────────────────
+    onProgress('Introduction...', 15);
 
-    const introPrompt = `Recherche sur "${h1}" puis écris une introduction de 80-100 mots.
-Inclure ce lien naturellement : <a href="${anchorUrl}">${anchorText}</a>
-Réponds avec UNIQUEMENT le HTML (<p> avec <strong>).`;
+    const introPrompt = `Intro 80-100 mots pour "${h1}".
+Infos : ${keyFacts}
+Lien : <a href="${anchorUrl}">${anchorText}</a>
+HTML uniquement.`;
 
-    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 1000, true);
+    const introResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: introPrompt }], 600, false);
     const intro = cleanHtml(introResponse);
 
+    // ─── Sections (SANS web search, utilise keyFacts) ────────────────────
     const h2Sections: H2Section[] = [];
     const progressPerSection = 60 / h2Count;
     
@@ -392,47 +304,36 @@ Réponds avec UNIQUEMENT le HTML (<p> avec <strong>).`;
       onProgress(`Section ${i + 1}/${h2Count}...`, 20 + (i * progressPerSection));
       
       let extraContext = '';
-      if (i === 0 && featuredProducts.length > 0) {
-        extraContext += `\nMentionne ce produit : "${featuredProducts[0].title}" avec lien ${featuredProducts[0].url}`;
-      }
-      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) {
-        extraContext += `\nIntègre ce lien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
-      }
+      if (i === 0 && featuredProducts.length > 0) extraContext = `\nProduit : "${featuredProducts[0].title}" (${featuredProducts[0].url})`;
+      if (i === Math.floor(h2Count / 2) && blogLinks.length > 0) extraContext = `\nLien : <a href="${blogLinks[0].url}">${blogLinks[0].anchorText}</a>`;
 
-      const sectionPrompt = `Recherche sur "${question}" puis réponds avec ce JSON :
+      const sectionPrompt = `Section "${question}". Contexte : ${keyFacts}
+JSON :
 {
-  "intro": "1-2 phrases d'introduction",
-  "h3s": [{"title": "Sous-titre", "content": "<p>Contenu UTILE avec <strong>mots-clés</strong>.</p>"}],
-  "tip": "Conseil pratique (ou null)",
-  "conclusion": "Phrase de conclusion"
-}
-Infos RÉELLES et UTILES.${extraContext}`;
+  "intro": "1-2 phrases",
+  "h3s": [{"title": "Sous-titre", "content": "<p>Contenu utile.</p>"}],
+  "tip": "Conseil ou null",
+  "conclusion": "1 phrase"
+}${extraContext}`;
 
-      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], deepMode ? 2500 : 2000, true);
+      const sectionResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: sectionPrompt }], 800, false);
       const sectionData = extractJson(sectionResponse);
       
       const h3s: H3Section[] = [];
-      if (sectionData?.h3s && Array.isArray(sectionData.h3s)) {
+      if (sectionData?.h3s) {
         for (const h3 of sectionData.h3s) {
-          h3s.push({
-            id: uuidv4(),
-            title: h3.title || '',
-            content: cleanHtml(h3.content || ''),
-          });
+          h3s.push({ id: uuidv4(), title: h3.title || '', content: cleanHtml(h3.content || '') });
         }
       }
       
       let tip: Tip | null = null;
-      if (sectionData?.tip && typeof sectionData.tip === 'string' && sectionData.tip.length > 10) {
-        tip = { text: sectionData.tip };
-      }
+      if (sectionData?.tip && sectionData.tip.length > 10) tip = { text: sectionData.tip };
       
       let table: ComparisonTable | null = null;
       if (i === 1 || i === 3) {
-        const tablePrompt = `Tableau comparatif pour "${question}". JSON :
-{"headers": ["Critère", "Option 1", "Option 2"], "rows": [{"cells": ["...", "...", "..."]}]}
-Données RÉELLES.`;
-        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 800, true);
+        const tablePrompt = `Tableau "${question}". JSON :
+{"headers": ["Critère", "A", "B"], "rows": [{"cells": ["x", "y", "z"]}]}`;
+        const tableResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: tablePrompt }], 400, false);
         const tableData = extractJson(tableResponse);
         if (tableData?.headers && tableData?.rows) {
           table = { headers: tableData.headers, rows: tableData.rows.map((r: any) => ({ cells: r.cells || [] })) };
@@ -440,54 +341,34 @@ Données RÉELLES.`;
       }
 
       h2Sections.push({
-        id: uuidv4(),
-        question: question,
-        intro: sectionData?.intro || '',
-        paragraphs: [],
-        conclusion: sectionData?.conclusion || '',
-        tip: tip,
-        table: table,
-        h3s: h3s,
-        hasProductGrid: false,
-        products: [],
+        id: uuidv4(), question, intro: sectionData?.intro || '', paragraphs: [],
+        conclusion: sectionData?.conclusion || '', tip, table, h3s, hasProductGrid: false, products: [],
       });
     }
     
-    onProgress('Génération FAQ...', 90);
+    // ─── FAQ (SANS web search) ───────────────────────────────────────────
+    onProgress('FAQ...', 90);
 
-    const faqPrompt = `4 questions FAQ pour "${h1}". JSON :
-{"faq": [{"question": "?", "answer": "Réponse UTILE."}]}
-Réponses basées sur la recherche web.`;
+    const faqPrompt = `4 FAQ "${h1}". JSON :
+{"faq": [{"question": "?", "answer": "Réponse utile."}]}`;
 
-    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 1500, true);
+    const faqResponse = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: faqPrompt }], 600, false);
     const faqData = extractJson(faqResponse);
     
     const faqItems: FAQItem[] = [];
-    if (faqData?.faq && Array.isArray(faqData.faq)) {
+    if (faqData?.faq) {
       for (const item of faqData.faq) {
-        if (item.question && item.answer) {
-          faqItems.push({ question: item.question, answer: item.answer });
-        }
+        if (item.question && item.answer) faqItems.push({ question: item.question, answer: item.answer });
       }
     }
 
     onProgress('Terminé !', 100);
 
     return {
-      id: articleId,
-      h1,
-      seoTitle,
-      metaDescription,
+      id: articleId, h1, seoTitle, metaDescription,
       slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
-      intro,
-      anchorText,
-      anchorUrl,
-      h2Sections,
-      faq: faqItems,
-      featuredProducts,
-      blogLinks,
-      status: 'draft',
-      createdAt: new Date().toISOString(),
+      intro, anchorText, anchorUrl, h2Sections, faq: faqItems,
+      featuredProducts, blogLinks, status: 'draft', createdAt: new Date().toISOString(),
     };
     
   } catch (error) {
@@ -512,43 +393,33 @@ export async function generateMiniArticle(
   const articleId = uuidv4();
   const SYSTEM_PROMPT = buildSystemPrompt(h1, true);
   
-  onProgress('Recherche et rédaction...', 30);
+  // Une seule recherche web au début
+  onProgress('Recherche...', 20);
 
-  const prompt = `Recherche sur "${h1}" puis écris un article de ${wordCount} mots.
+  const researchPrompt = `Recherche "${h1}" et résume les infos clés en 100 mots.`;
+  const research = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: researchPrompt }], 400, true);
 
-Structure HTML :
-- <p> pour paragraphes avec <strong> sur mots-clés
-- <h2> pour 1-2 sous-titres
-- <ul><li> pour les listes
-- Intègre ce lien : <a href="${anchorUrl}">${anchorText}</a>
-${featuredProducts.length > 0 ? `- Mentionne : ${featuredProducts[0].title}` : ''}
+  onProgress('Rédaction...', 50);
 
-IMPORTANT : Contenu UTILE basé sur la recherche web. Pas de remplissage.
+  const prompt = `Article ${wordCount} mots sur "${h1}".
+Infos recherchées : ${research}
+Structure : <p>, <h2>, <ul><li>, <strong>
+Lien : <a href="${anchorUrl}">${anchorText}</a>
+${featuredProducts.length > 0 ? `Produit : ${featuredProducts[0].title}` : ''}
+HTML uniquement.`;
 
-Réponds avec UNIQUEMENT le HTML.`;
-
-  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], deepMode ? 2000 : 1500, true);
+  const response = await callClaude(SYSTEM_PROMPT, [{ role: 'user', content: prompt }], 1200, false);
   const content = cleanHtml(response);
 
   onProgress('Terminé !', 100);
 
   return {
-    id: articleId,
-    h1,
+    id: articleId, h1,
     seoTitle: `${h1.slice(0, 50)} – Livraison gratuite`,
     metaDescription: `Découvrez ${h1.toLowerCase()}. Guide pratique.`,
     slug: h1.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 50),
-    intro: '',
-    anchorText,
-    anchorUrl,
-    h2Sections: [],
-    faq: [],
-    featuredProducts,
-    blogLinks,
-    status: 'draft',
-    createdAt: new Date().toISOString(),
-    isMini: true,
-    miniContent: content,
-    miniWordCount: wordCount,
+    intro: '', anchorText, anchorUrl, h2Sections: [], faq: [],
+    featuredProducts, blogLinks, status: 'draft', createdAt: new Date().toISOString(),
+    isMini: true, miniContent: content, miniWordCount: wordCount,
   };
 }
